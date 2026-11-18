@@ -6,7 +6,7 @@ Luna analyzes local gaming recordings and returns ranked timestamp suggestions. 
 
 - **Desktop:** Tauri 2, React 19, TypeScript strict mode, and Vite.
 - **Native core:** Rust owns file inspection, worker lifecycle, job events, and SQLite persistence.
-- **Analysis:** a separate Python JSONL worker uses FFmpeg for streaming audio extraction and low-rate video sampling. NumPy and OpenCV are used when available; standard-library fallbacks keep baseline analysis available.
+- **Analysis:** a separate Python JSONL worker uses FFmpeg for streaming audio extraction and low-rate video sampling. Frame comparison uses the Python standard library to avoid native-library import stalls inside the threaded worker.
 - **Persistence:** versioned SQLite migration stores sources, job state, configuration, candidates, evidence, and explanations in the app's local data directory.
 
 The frontend stays responsive while Rust reads worker events on a background thread. The worker does not write logs to its JSONL output; diagnostics go to stderr. A recording is referenced by path and is never copied or modified.

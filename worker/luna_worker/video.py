@@ -59,15 +59,7 @@ def analyze(path: str, duration_seconds: float, cancelled: threading.Event,
             if len(frame) != frame_bytes:
                 break
             if previous is not None:
-                try:
-                    import numpy as np
-                    import cv2
-
-                    before = np.frombuffer(previous, dtype=np.uint8).reshape((height, width))
-                    current = np.frombuffer(frame, dtype=np.uint8).reshape((height, width))
-                    difference = float(cv2.absdiff(before, current).mean()) / 255.0
-                except ImportError:
-                    difference = sum(abs(a - b) for a, b in zip(previous, frame)) / frame_bytes / 255.0
+                difference = sum(abs(a - b) for a, b in zip(previous, frame)) / frame_bytes / 255.0
                 frames.append((frame_index * interval_seconds, difference))
             previous = frame
             frame_index += 1

@@ -141,6 +141,28 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "error")
         self.assertEqual(events[-1]["code"], "source_missing")
 
+    def test_worker_process_completes_video_analysis_with_control_pipe_open(self) -> None:
+        from luna_worker import DEFAULT_CONFIG
+
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "worker" / "clipper_worker.py"), "--path", str(self.recording),
+             "--job-id", "video-worker-test", "--config-json", json.dumps(DEFAULT_CONFIG)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", env=os.environ.copy(),
+        )
+        events: list[dict] = []
+        reader = threading.Thread(target=lambda: events.extend(json.loads(line) for line in process.stdout), daemon=True)
+        reader.start()
+        exit_code = process.wait(timeout=30)
+        process.stdin.close()
+        reader.join(timeout=5)
+        process.stdout.close()
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(events)
+        self.assertTrue(all(event["job_id"] == "video-worker-test" for event in events))
+        self.assertEqual(events[-1]["type"], "complete")
+        self.assertGreater(events[-1]["candidate_count"], 0)
+
     def test_worker_control_channel_cancels_the_requested_job(self) -> None:
         from luna_worker import DEFAULT_CONFIG
 
