@@ -9,4 +9,9 @@ set "APPDATA=%PROJECT_ROOT%.runtime\roaming"
 set "LOCALAPPDATA=%PROJECT_ROOT%.runtime\local"
 set "TEMP=%PROJECT_ROOT%.runtime\temp"
 set "TMP=%PROJECT_ROOT%.runtime\temp"
-start "Luna" "%PROJECT_ROOT%src-tauri\target\release\luna.exe"
+if exist "%PROJECT_ROOT%.build-next\release\luna.exe" (
+  set "LUNA_EXE=%PROJECT_ROOT%.build-next\release\luna.exe"
+) else (
+  set "LUNA_EXE=%PROJECT_ROOT%src-tauri\target\release\luna.exe"
+)
+start "Luna" "%LUNA_EXE%"

@@ -19,6 +19,7 @@ use storage::{Database, HistoryEntry};
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MAX_WORKER_MESSAGE_BYTES: usize = 1_048_576;
 const MAX_WORKER_RUNTIME: Duration = Duration::from_secs(12 * 60 * 60);
+const MIN_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_ANALYSIS_CONFIG: &str = include_str!("../../worker/config.json");
 
 struct AppState {
@@ -65,9 +66,13 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     }
     let worker_path = resolve_worker(&app)?;
     let (python, python_args) = resolve_python()?;
-    let source_id = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
-        .source_id(&path)?
-        .ok_or_else(|| "Import this recording before starting analysis.".to_string())?;
+    let (source_id, duration_seconds) = {
+        let database = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?;
+        let source_id = database.source_id(&path)?
+            .ok_or_else(|| "Import this recording before starting analysis.".to_string())?;
+        (source_id, database.source_duration_seconds(source_id)?)
+    };
+    let worker_idle_timeout = Duration::from_secs_f64((duration_seconds * 0.07).max(MIN_WORKER_IDLE_TIMEOUT.as_secs_f64()));
     let job_id = new_job_id();
     state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
         .create_job(&job_id, source_id, DEFAULT_ANALYSIS_CONFIG)?;
@@ -103,7 +108,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     let state_thread = Arc::clone(state.inner());
     let thread_job_id = job_id.clone();
     thread::spawn(move || {
-        monitor_worker(app_thread, state_thread, thread_job_id, child, stdout, stderr);
+        monitor_worker(app_thread, state_thread, thread_job_id, child, stdout, stderr, worker_idle_timeout);
     });
     Ok(job_id)
 }
@@ -253,7 +258,8 @@ fn new_job_id() -> String {
 }
 
 fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut child: Child,
-                  stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static) {
+                  stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static,
+                  idle_timeout: Duration) {
     let (output_sender, output_receiver) = mpsc::sync_channel(32);
     let stdout_thread = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -294,12 +300,20 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
     let mut terminal = false;
     let mut invalid_message = None;
     let deadline = Instant::now() + MAX_WORKER_RUNTIME;
+    let mut last_activity = Instant::now();
+    let mut last_stage = "starting the Python worker".to_string();
     loop {
-        let output = match output_receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let remaining = idle_timeout.saturating_sub(last_activity.elapsed())
+            .min(deadline.saturating_duration_since(Instant::now()));
+        let output = match output_receiver.recv_timeout(remaining) {
             Ok(output) => output,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                invalid_message = Some(format!("Analysis exceeded the {} hour time limit.", MAX_WORKER_RUNTIME.as_secs() / 3600));
+                invalid_message = Some(if last_activity.elapsed() >= idle_timeout {
+                    format!("The analysis worker stopped responding during {last_stage}. Try the recording again.")
+                } else {
+                    format!("Analysis exceeded the {} hour time limit.", MAX_WORKER_RUNTIME.as_secs() / 3600)
+                });
                 terminal = false;
                 let _ = child.kill();
                 break;
@@ -307,6 +321,7 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
         };
         match output {
             Ok(line) => {
+                last_activity = Instant::now();
                 let event: Value = match serde_json::from_slice(&line) {
                     Ok(event) => event,
                     Err(error) => {
@@ -321,6 +336,7 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
                     break;
                 }
                 let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+                last_stage = event.get("stage").and_then(Value::as_str).unwrap_or(kind).to_string();
                 let update = state.database.lock()
                     .map_err(|_| "Database lock is unavailable.".to_string())
                     .and_then(|mut database| database.update_event(&event));

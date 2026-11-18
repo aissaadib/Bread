@@ -84,6 +84,14 @@ impl Database {
             .optional().map_err(db_error)
     }
 
+    pub(crate) fn source_duration_seconds(&self, source_id: i64) -> Result<f64, String> {
+        self.connection.query_row(
+            "SELECT duration_ms FROM sources WHERE id=?1",
+            [source_id],
+            |row| row.get::<_, i64>(0),
+        ).map(|duration_ms| duration_ms.max(0) as f64 / 1000.0).map_err(db_error)
+    }
+
     pub(crate) fn create_job(&mut self, id: &str, source_id: i64, config_json: &str) -> Result<(), String> {
         self.connection.execute(
             "INSERT INTO jobs(id,source_id,status,stage,progress,analysis_version,config_json) VALUES(?1,?2,'queued','queued',0,'0.1.0',?3)",
