@@ -296,7 +296,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data_path = app.path().app_data_dir()?.join("luna.sqlite3");
+            let data_dir = match std::env::var_os("LUNA_DATA_DIR") {
+                Some(path) => PathBuf::from(path),
+                None => app.path().app_data_dir()?,
+            };
+            fs::create_dir_all(&data_dir)?;
+            let data_path = data_dir.join("luna.sqlite3");
             let database = Database::open(&data_path).map_err(std::io::Error::other)?;
             app.manage(Arc::new(AppState { database: Mutex::new(database), workers: Mutex::new(HashMap::new()) }));
             Ok(())
