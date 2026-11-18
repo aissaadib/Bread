@@ -8,9 +8,9 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
+    sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
@@ -18,6 +18,7 @@ use storage::{Database, HistoryEntry};
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MAX_WORKER_MESSAGE_BYTES: usize = 1_048_576;
+const MAX_WORKER_RUNTIME: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_ANALYSIS_CONFIG: &str = include_str!("../../worker/config.json");
 
 struct AppState {
@@ -210,6 +211,27 @@ fn new_job_id() -> String {
 
 fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut child: Child,
                   stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static) {
+    let (output_sender, output_receiver) = mpsc::sync_channel(32);
+    let stdout_thread = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = Vec::new();
+            match reader.by_ref().take((MAX_WORKER_MESSAGE_BYTES + 1) as u64).read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(length) if length <= MAX_WORKER_MESSAGE_BYTES && line.last() == Some(&b'\n') => {
+                    if output_sender.send(Ok(line)).is_err() { break; }
+                }
+                Ok(_) => {
+                    let _ = output_sender.send(Err("Python worker message exceeded the size limit or was truncated.".to_string()));
+                    break;
+                }
+                Err(error) => {
+                    let _ = output_sender.send(Err(format!("Could not read Python worker output: {error}")));
+                    break;
+                }
+            }
+        }
+    });
     let stderr_thread = thread::spawn(move || {
         let mut bytes = Vec::new();
         let mut reader = BufReader::new(stderr);
@@ -228,12 +250,20 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
     });
     let mut terminal = false;
     let mut invalid_message = None;
-    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + MAX_WORKER_RUNTIME;
     loop {
-        let mut line = Vec::new();
-        match reader.by_ref().take((MAX_WORKER_MESSAGE_BYTES + 1) as u64).read_until(b'\n', &mut line) {
-            Ok(0) => break,
-            Ok(length) if length <= MAX_WORKER_MESSAGE_BYTES && line.last() == Some(&b'\n') => {
+        let output = match output_receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(output) => output,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                invalid_message = Some(format!("Analysis exceeded the {} hour time limit.", MAX_WORKER_RUNTIME.as_secs() / 3600));
+                terminal = false;
+                let _ = child.kill();
+                break;
+            }
+        };
+        match output {
+            Ok(line) => {
                 let event: Value = match serde_json::from_slice(&line) {
                     Ok(event) => event,
                     Err(error) => {
@@ -259,19 +289,15 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
                 terminal |= matches!(kind, "complete" | "error" | "cancelled");
                 let _ = app.emit("analysis-event", event);
             }
-            Ok(_) => {
-                invalid_message = Some("Python worker message exceeded the size limit.".to_string());
-                let _ = child.kill();
-                break;
-            }
             Err(error) => {
-                invalid_message = Some(format!("Could not read Python worker output: {error}"));
+                invalid_message = Some(error);
                 let _ = child.kill();
                 break;
             }
         }
     }
     let exit = child.wait();
+    let _ = stdout_thread.join();
     let diagnostics = stderr_thread.join().unwrap_or_default();
     if !terminal {
         let message = invalid_message.unwrap_or_else(|| {
