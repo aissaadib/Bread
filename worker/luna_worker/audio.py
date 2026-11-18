@@ -211,6 +211,7 @@ def analyze(path: str, has_audio: bool, duration_seconds: float, cancelled: thre
                 "magnitude": round(magnitude, 4),
                 "metadata": {"rms_dbfs": round(rms_dbfs, 2), "baseline_dbfs": round(median, 2),
                              "delta_db": round(delta, 2), "peak": round(peak, 4), "zero_crossing_rate": round(zcr, 4),
-                             "zcr_delta": round(zcr_delta, 4), "texture_change": texture_anomaly},
+                             "zcr_delta": round(zcr_delta, 4), "texture_change": texture_anomaly,
+                             "audio_track": audio_stream_index + 1},
             })
     return observations, speech, vad_notice

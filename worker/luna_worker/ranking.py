@@ -84,8 +84,8 @@ def rank(observations: list[dict], speech_intervals: list[dict], transcript: lis
         if audio:
             max_delta = max((float(item.get("metadata", {}).get("delta_db", 0))
                              for item in group if item["signal"] == "audio_anomaly"), default=0.0)
-            if max_delta >= 9:
-                descriptions.append(f"Audio rose {max_delta:.0f} dB above its local baseline")
+            if max_delta >= 6:
+                descriptions.append(f"Audio rose {max_delta:.1f} dB above its local baseline")
             elif any(item.get("metadata", {}).get("texture_change") for item in group):
                 descriptions.append("Audio texture changed from its local baseline")
         if visual:
