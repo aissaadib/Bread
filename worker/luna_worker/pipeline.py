@@ -5,10 +5,11 @@ import threading
 from typing import Callable
 
 from . import ANALYSIS_VERSION, DEFAULT_CONFIG
-from . import audio, media, ranking, transcription, video
+from . import audio, clips, media, ranking, titles, transcription, video
 
 
-def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], config: dict | None = None) -> None:
+def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], config: dict | None = None,
+            output_dir: str | None = None) -> None:
     config = config or DEFAULT_CONFIG
     emit("stage", stage="inspecting", progress=1)
     info = media.inspect_media(path)
@@ -55,7 +56,23 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
         raise InterruptedError("Analysis cancelled.")
     emit("stage", stage="ranking", progress=95)
     candidates = ranking.rank(observations, speech, transcript, info["duration_seconds"], config)
-    for candidate in candidates:
+    if output_dir and candidates:
+        emit("stage", stage="rendering_clips", progress=96)
+    title_fallback_noted = False
+    for index, candidate in enumerate(candidates, start=1):
+        title, title_source = titles.generate(candidate, transcript)
+        candidate["title"] = title
+        candidate["title_source"] = title_source
+        if title_source == "evidence_fallback" and not title_fallback_noted:
+            notices.append("Local AI title model is not available; clips use descriptive evidence titles.")
+            title_fallback_noted = True
+        if output_dir:
+            try:
+                candidate["clip_path"] = clips.render(path, output_dir, candidate, title, index)
+            except RuntimeError as exc:
+                candidate["clip_path"] = None
+                notices.append(str(exc))
+            emit("progress", stage="rendering_clips", progress=96 + int(index / len(candidates) * 3))
         emit("candidate", candidate=candidate)
     emit(
         "complete", progress=100, duration_seconds=info["duration_seconds"],

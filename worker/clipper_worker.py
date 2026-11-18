@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--path", required=True)
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--config-json", required=True)
+    parser.add_argument("--output-dir")
     args = parser.parse_args()
     try:
         config = json.loads(args.config_json)
@@ -39,7 +40,7 @@ def main() -> int:
         emit(args.job_id, event_type, **data)
 
     try:
-        analyze(args.path, cancelled, send, config)
+        analyze(args.path, cancelled, send, config, args.output_dir)
         return 0
     except InterruptedError as exc:
         send("cancelled", message=str(exc))

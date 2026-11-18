@@ -17,6 +17,7 @@ from luna_worker.audio import _window_features
 from luna_worker.media import MediaError, inspect_media
 from luna_worker.pipeline import analyze
 from luna_worker.ranking import rank
+from luna_worker.titles import generate
 
 ARTIFACTS = ROOT / ".test-output"
 
@@ -104,6 +105,32 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(candidate["end_ms"], candidate["peak_ms"])
         self.assertLessEqual(candidate["end_ms"], 12_000)
         self.assertLessEqual(candidate["end_ms"] - candidate["start_ms"], 45_000)
+
+    def test_pipeline_saves_named_mp4_clips(self) -> None:
+        output_dir = ARTIFACTS / "clips"
+        output_dir.mkdir(exist_ok=True)
+        model = os.environ.pop("LUNA_TITLE_MODEL", None)
+        try:
+            emitted: list[tuple[str, dict]] = []
+            analyze(str(self.recording), threading.Event(), lambda kind, **data: emitted.append((kind, data)),
+                    output_dir=str(output_dir))
+        finally:
+            if model is not None:
+                os.environ["LUNA_TITLE_MODEL"] = model
+        candidates = [data["candidate"] for kind, data in emitted if kind == "candidate"]
+        completed = next(data for kind, data in emitted if kind == "complete")
+        self.assertTrue(candidates)
+        self.assertTrue(all(Path(item["clip_path"]).is_file() for item in candidates))
+        self.assertTrue(all(item["clip_path"].endswith(".mp4") for item in candidates))
+        self.assertTrue(all(item["title"] in Path(item["clip_path"]).name for item in candidates))
+        self.assertTrue(any("Local AI title model" in note for note in completed["notices"]))
+
+    def test_title_fallback_is_descriptive_and_filesystem_safe(self) -> None:
+        title, source = generate({"peak_ms": 61_000, "signals": ["audio_anomaly"],
+                                  "explanation": 'Audio: 90% <> "unexpected"'}, [])
+        self.assertEqual(source, "evidence_fallback")
+        self.assertEqual(title, "Unexpected Audio Spike 01-01")
+        self.assertFalse(any(character in title for character in '<>:"/\\|?*'))
 
     def test_cancellation_stops_audio_work(self) -> None:
         cancelled = threading.Event()
