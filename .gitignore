@@ -5,6 +5,8 @@ src-tauri/gen/
 .temp/
 .npm-cache/
 .cargo-cache/
+.test-output/
+.torch-cache/
 .venv/
 __pycache__/
 *.py[cod]

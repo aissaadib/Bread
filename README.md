@@ -1,33 +1,72 @@
 # Luna — local stream analyzer
 
-Luna is a Windows desktop app for analyzing gaming recordings and returning ranked highlight timestamps. V0.1 starts with local files. It does not download platform streams, edit video, or upload media.
+Luna analyzes local gaming recordings and returns ranked timestamp suggestions. V0.1 accepts local MP4, MKV, and WebM files. It does not download platform streams, edit video, render clips, or upload media.
 
-## Stack
+## Architecture
 
-- Tauri 2 and Rust for the native desktop lifecycle, safe file inspection, and later SQLite-backed jobs.
-- React 19, TypeScript strict mode, and Vite for the interface.
-- A separate Python worker for the analysis pipeline.
-- FFmpeg and FFprobe for media processing and metadata.
-- SQLite for persistent sources, jobs, and candidates in a later foundation step.
+- **Desktop:** Tauri 2, React 19, TypeScript strict mode, and Vite.
+- **Native core:** Rust owns file inspection, worker lifecycle, job events, and SQLite persistence.
+- **Analysis:** a separate Python JSONL worker uses FFmpeg for streaming audio extraction and low-rate video sampling. NumPy and OpenCV are used when available; standard-library fallbacks keep baseline analysis available.
+- **Persistence:** versioned SQLite migration stores sources, job state, configuration, candidates, evidence, and explanations in the app's local data directory.
 
-This stack follows the LUNA brief: the frontend stays responsive, Rust owns native lifecycle and persistence, and Python modules can be tested without the desktop app. Local files are the initial source abstraction; authorized cloud/platform integrations are future work.
+The frontend stays responsive while Rust reads worker events on a background thread. The worker does not write logs to its JSONL output; diagnostics go to stderr. A recording is referenced by path and is never copied or modified.
 
-## Current foundation
+## What works
 
-The first screen selects a local MP4, MKV, or WebM and asks FFprobe for duration, resolution, frame rate, codecs, and audio availability. It preserves the original media. The analysis button is intentionally disabled until a real processing pipeline exists.
+- Import and inspect local MP4/MKV/WebM recordings with FFprobe.
+- Persist imported source metadata and deduplicate by canonical file path.
+- Analyze mono 16 kHz audio in one-second windows with a rolling, local median/MAD baseline.
+- Sample video at 0.5 fps and 160×90 resolution, then measure adjacent frame changes.
+- Combine and rank audio events with speech, transcript, and visual evidence where available; clamp and merge timestamp candidates.
+- Show live worker stages/progress, cancel an analysis, view results, and reopen saved analysis history.
+- Recover unfinished jobs as failed after an app restart.
+
+The score is a transparent ranking aid, not a probability of a true highlight. A large visual change alone is not enough to create a candidate.
+
+## Synthetic long-recording check
+
+On this Windows machine (20 logical processors, 15.7 GiB available to the runtime, Python 3.14, FFmpeg 9.0.2), the 3-hour 160×90/1 fps synthetic MP4 with a known audio + visual event completed analysis in **22.6 seconds**. The known event at 90:00 was returned at 90:00.500 (0.5-second error); one candidate was returned, measured throughput was 477.9× real time, and sampled Python-plus-child peak RSS was 204.2 MiB. This is a low-complexity synthetic media result, not a GTA VI/real-stream accuracy claim. Run `python worker/tests/benchmark_synthetic.py` to repeat it; the script cleans its generated file afterward. Peak RAM sampling uses optional `psutil`; when unavailable, the benchmark reports no memory value.
+
+## Optional local speech models
+
+The baseline audio/video path runs without AI packages. Silero VAD activates when the `silero-vad` package is installed. Faster-Whisper activates only when `LUNA_WHISPER_MODEL` points to a complete local CTranslate2 model folder. The app uses CPU int8 and `local_files_only=True`; it never downloads a model automatically. Optional package requirements are in `worker/requirements-optional.txt`.
+
+If Python is not available as `python`, set `LUNA_PYTHON` to the Python executable path before starting Luna. FFmpeg and FFprobe must be on `PATH`.
 
 ## Requirements
 
 - Node.js 20.19+ or 22.12+.
-- Rust stable and the Tauri Windows prerequisites, including WebView2 and Microsoft C++ Build Tools.
-- FFmpeg/FFprobe on `PATH` for media inspection.
-- Python 3.11+ will be needed when the worker milestone is connected.
+- Rust stable and the Tauri Windows prerequisites: WebView2 and Microsoft C++ Build Tools.
+- Python 3.11+ for the analysis worker.
+- FFmpeg/FFprobe on `PATH`.
 
-## Run
+## Run on Windows
 
 ```powershell
-npm install
+npm ci
 npm run tauri dev
 ```
 
-Dependency installation and desktop compilation have not yet been verified in this workspace because package registry access was unavailable during initial setup. Do not treat the analysis workflow as implemented yet.
+For a release executable:
+
+```powershell
+npm run tauri build
+```
+
+## Verify
+
+```powershell
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
+npm run test:worker
+```
+
+The worker tests generate small synthetic files under `.test-output` and remove them after the run. Synthetic tests validate pipeline mechanics and timing tolerance; they do not measure real highlight quality. See [worker/EVALUATION.md](worker/EVALUATION.md) for a manual real-recording evaluation procedure.
+
+## Current limits
+
+- VAD and transcription depend on optional local packages/models. The app remains useful without them.
+- Generic audio anomalies and frame changes are only clues; the initial detector is not game-specific and has no calibrated real-world accuracy.
+- One analysis runs at a time. The worker decodes the source separately for audio and video.
+- No actual clip trimming/export, subtitles, cloud sources, account integration, or platform stream downloading.
+- The Windows release executable builds, but the UI, picker, and full Tauri-to-worker workflow have not been launched interactively. Compile checks and worker integration tests do not verify WebView behavior.
