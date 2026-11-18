@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.temp/
+.npm-cache/
+.cargo-cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.models/
+.clipper-data/
+*.sqlite3-wal
+*.sqlite3-shm
