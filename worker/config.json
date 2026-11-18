@@ -1,0 +1,32 @@
+{
+  "analysis_version": "0.1.0",
+  "audio": {
+    "sample_rate": 16000,
+    "window_seconds": 1,
+    "baseline_context_seconds": 30,
+    "minimum_baseline_delta_db": 9.0,
+    "minimum_rms_dbfs": -55.0,
+    "minimum_peak": 0.04,
+    "minimum_zcr_delta": 0.12,
+    "vad_chunk_seconds": 10
+  },
+  "video": {
+    "sample_rate_fps": 0.5,
+    "width": 160,
+    "height": 90,
+    "minimum_change": 0.12,
+    "baseline_context_frames": 30
+  },
+  "ranking": {
+    "pre_context_ms": 15000,
+    "post_context_ms": 10000,
+    "max_duration_ms": 45000,
+    "merge_gap_ms": 16000,
+    "max_event_span_ms": 30000,
+    "weights": {
+      "audio": 45,
+      "visual": 22,
+      "speech": 18
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# Install only when enabling local speech signals. No models are fetched by Luna.
+silero-vad>=6.0,<7
+faster-whisper>=1.1,<2
