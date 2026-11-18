@@ -47,6 +47,8 @@ npm ci
 npm run tauri dev
 ```
 
+After building a release, double-click `run-luna.cmd` to launch the desktop app with its database, WebView profile, temporary files, and model cache contained under `.runtime` in this project. Desktop apps started by Codex command sessions may be closed when the session ends; launching this script from Explorer runs it outside that session.
+
 For a release executable:
 
 ```powershell
