@@ -64,6 +64,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
         return Err("An analysis is already running. Wait for it to finish or cancel it first.".into());
     }
     let worker_path = resolve_worker(&app)?;
+    let (python, python_args) = resolve_python()?;
     let source_id = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
         .source_id(&path)?
         .ok_or_else(|| "Import this recording before starting analysis.".to_string())?;
@@ -71,9 +72,9 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
         .create_job(&job_id, source_id, DEFAULT_ANALYSIS_CONFIG)?;
 
-    let python = std::env::var_os("LUNA_PYTHON").unwrap_or_else(|| "python".into());
     let mut command = Command::new(python);
-    command.arg(worker_path)
+    command.args(python_args)
+        .arg(worker_path)
         .arg("--path").arg(&path)
         .arg("--job-id").arg(&job_id)
         .arg("--config-json").arg(DEFAULT_ANALYSIS_CONFIG)
@@ -201,6 +202,48 @@ fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
     }
     app.path().resolve("worker/clipper_worker.py", BaseDirectory::Resource)
         .map_err(|error| format!("The bundled Python worker could not be located: {error}"))
+}
+
+fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
+    let explicit = std::env::var_os("LUNA_PYTHON");
+    let mut candidates: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
+    if let Some(path) = explicit {
+        candidates.push((PathBuf::from(path), Vec::new()));
+    } else {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            candidates.push((local_app_data.join("Python/bin/python.exe"), Vec::new()));
+            let installs = local_app_data.join("Programs/Python");
+            if let Ok(entries) = fs::read_dir(installs) {
+                let mut interpreters: Vec<_> = entries.flatten()
+                    .map(|entry| entry.path().join("python.exe"))
+                    .filter(|path| path.is_file())
+                    .collect();
+                interpreters.sort_by(|left, right| right.cmp(left));
+                candidates.extend(interpreters.into_iter().map(|path| (path, Vec::new())));
+            }
+        }
+        candidates.push((PathBuf::from("py"), vec!["-3".into()]));
+        candidates.push((PathBuf::from("python3"), Vec::new()));
+        candidates.push((PathBuf::from("python"), Vec::new()));
+    }
+
+    for (executable, args) in candidates {
+        let Ok(output) = Command::new(&executable).args(&args).arg("--version").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let version = format!("{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let supported = version.split_whitespace()
+            .find_map(|part| part.strip_prefix("3.")?.split('.').next()?.parse::<u32>().ok())
+            .is_some_and(|minor| minor >= 11);
+        if supported {
+            return Ok((executable, args));
+        }
+    }
+    Err("Python 3.11 or newer was not found. Install Python or set LUNA_PYTHON to its executable.".into())
 }
 
 fn new_job_id() -> String {

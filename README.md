@@ -31,7 +31,7 @@ On this Windows machine (20 logical processors, 15.7 GiB available to the runtim
 
 The baseline audio/video path runs without AI packages. Silero VAD activates when the `silero-vad` package is installed. Faster-Whisper activates only when `LUNA_WHISPER_MODEL` points to a complete local CTranslate2 model folder. The app uses CPU int8 and `local_files_only=True`; it never downloads a model automatically. Optional package requirements are in `worker/requirements-optional.txt`.
 
-If Python is not available as `python`, set `LUNA_PYTHON` to the Python executable path before starting Luna. FFmpeg and FFprobe must be on `PATH`.
+Luna looks for Python 3.11+ in common Windows install locations and through the `py -3`, `python3`, and `python` commands. For a non-standard installation, set `LUNA_PYTHON` to the Python executable path before starting Luna. FFmpeg and FFprobe must be on `PATH`.
 
 ## Requirements
 
