@@ -72,6 +72,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
             .ok_or_else(|| "Import this recording before starting analysis.".to_string())?;
         (source_id, database.source_duration_seconds(source_id)?)
     };
+    let output_dir = clip_output_dir(&app, &path)?;
     let worker_idle_timeout = Duration::from_secs_f64((duration_seconds * 0.07).max(MIN_WORKER_IDLE_TIMEOUT.as_secs_f64()));
     let job_id = new_job_id();
     state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
@@ -81,6 +82,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     command.args(python_args)
         .arg(worker_path)
         .arg("--path").arg(&path)
+        .arg("--output-dir").arg(&output_dir)
         .arg("--job-id").arg(&job_id)
         .arg("--config-json").arg(DEFAULT_ANALYSIS_CONFIG)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -207,6 +209,26 @@ fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
     }
     app.path().resolve("worker/clipper_worker.py", BaseDirectory::Resource)
         .map_err(|error| format!("The bundled Python worker could not be located: {error}"))
+}
+
+fn clip_output_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String> {
+    let downloads = app.path().download_dir()
+        .map_err(|error| format!("Could not find the Downloads folder: {error}"))?;
+    let stem = Path::new(media_path).file_stem().and_then(|name| name.to_str()).unwrap_or("Luna clips");
+    let safe_name: String = stem.chars()
+        .map(|character| if character.is_control() || "<>:\"/\\|?*".contains(character) { '_' } else { character })
+        .collect();
+    let safe_name = safe_name.trim_matches([' ', '.']);
+    let safe_name = if safe_name.is_empty() { "Luna clips" } else { safe_name };
+    let reserved = safe_name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let safe_name = if matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9") {
+        format!("_{safe_name}")
+    } else {
+        safe_name.to_string()
+    };
+    let folder = downloads.join(safe_name);
+    fs::create_dir_all(&folder).map_err(|error| format!("Could not create the clip folder in Downloads: {error}"))?;
+    Ok(folder)
 }
 
 fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {

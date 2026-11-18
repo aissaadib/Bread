@@ -6,6 +6,7 @@ use std::{fs, path::Path};
 use crate::MediaInfo;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
+const CLIP_EXPORT_SCHEMA: &str = include_str!("../migrations/002_clip_exports.sql");
 
 pub(crate) struct Database {
     connection: Connection,
@@ -35,6 +36,9 @@ pub struct HistoryCandidate {
     pub score: u8,
     pub signals: Vec<String>,
     pub explanation: String,
+    pub title: String,
+    pub title_source: String,
+    pub clip_path: Option<String>,
 }
 
 impl Database {
@@ -46,10 +50,16 @@ impl Database {
         connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(db_error)?;
         connection.pragma_update(None, "foreign_keys", "ON").map_err(db_error)?;
         connection.pragma_update(None, "journal_mode", "WAL").map_err(db_error)?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).map_err(db_error)?;
+        let mut version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).map_err(db_error)?;
         if version == 0 {
             connection.execute_batch(INITIAL_SCHEMA).map_err(db_error)?;
-        } else if version > 1 {
+            version = 1;
+        }
+        if version == 1 {
+            connection.execute_batch(CLIP_EXPORT_SCHEMA).map_err(db_error)?;
+            version = 2;
+        }
+        if version > 2 {
             return Err(format!("Database version {version} is newer than this Luna build."));
         }
         connection.execute(
@@ -127,14 +137,17 @@ impl Database {
                 let signals = candidate.get("signals").cloned().unwrap_or(Value::Array(Vec::new()));
                 let evidence = candidate.get("evidence").cloned().unwrap_or(Value::Array(Vec::new()));
                 self.connection.execute(
-                    "INSERT OR REPLACE INTO candidates(job_id,start_ms,peak_ms,end_ms,score,signals_json,evidence_json,explanation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    "INSERT OR REPLACE INTO candidates(job_id,start_ms,peak_ms,end_ms,score,signals_json,evidence_json,explanation,title,title_source,clip_path) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                     params![id,
                         candidate.get("start_ms").and_then(Value::as_i64).unwrap_or(0),
                         candidate.get("peak_ms").and_then(Value::as_i64).unwrap_or(0),
                         candidate.get("end_ms").and_then(Value::as_i64).unwrap_or(0),
                         candidate.get("score").and_then(Value::as_i64).unwrap_or(0),
                         signals.to_string(), evidence.to_string(),
-                        candidate.get("explanation").and_then(Value::as_str).unwrap_or("Detected event")],
+                        candidate.get("explanation").and_then(Value::as_str).unwrap_or("Detected event"),
+                        candidate.get("title").and_then(Value::as_str).unwrap_or("Highlight"),
+                        candidate.get("title_source").and_then(Value::as_str).unwrap_or("evidence_fallback"),
+                        candidate.get("clip_path").and_then(Value::as_str)],
                 ).map_err(db_error)?;
             }
             "stage" | "progress" => {
@@ -192,7 +205,7 @@ impl Database {
 
     fn candidates(&self, job_id: &str) -> Result<Vec<HistoryCandidate>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT start_ms,peak_ms,end_ms,score,signals_json,explanation FROM candidates WHERE job_id=?1 ORDER BY start_ms",
+            "SELECT start_ms,peak_ms,end_ms,score,signals_json,explanation,title,title_source,clip_path FROM candidates WHERE job_id=?1 ORDER BY start_ms",
         ).map_err(db_error)?;
         let rows = statement.query_map([job_id], |row| {
             let raw_signals: String = row.get(4)?;
@@ -202,7 +215,8 @@ impl Database {
                 peak_ms: row.get::<_, i64>(1)?.max(0) as u64,
                 end_ms: row.get::<_, i64>(2)?.max(0) as u64,
                 score: row.get::<_, i64>(3)?.clamp(0, 100) as u8,
-                signals, explanation: row.get(5)?,
+                signals, explanation: row.get(5)?, title: row.get(6)?,
+                title_source: row.get(7)?, clip_path: row.get(8)?,
             })
         }).map_err(db_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
