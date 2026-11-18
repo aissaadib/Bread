@@ -23,6 +23,9 @@ type Candidate = {
   score: number;
   signals: string[];
   explanation: string;
+  title: string;
+  titleSource: string;
+  clipPath: string | null;
 };
 
 type HistoryEntry = {
@@ -52,6 +55,9 @@ type AnalysisEvent = {
     score: number;
     signals: string[];
     explanation: string;
+    title?: string;
+    title_source?: string;
+    clip_path?: string | null;
   };
   notices?: string[];
 };
@@ -83,6 +89,7 @@ const stageNames: Record<string, string> = {
   analyzing_video: "Analyzing video",
   transcribing: "Transcribing locally",
   ranking: "Combining event signals",
+  rendering_clips: "Saving MP4 clips",
   completed: "Analysis complete",
   cancelling: "Stopping analysis",
   cancelled: "Analysis cancelled",
@@ -141,6 +148,9 @@ function applyEvent(current: ActiveAnalysis, event: AnalysisEvent): ActiveAnalys
           score: candidate.score,
           signals: candidate.signals,
           explanation: candidate.explanation,
+          title: candidate.title ?? "Highlight",
+          titleSource: candidate.title_source ?? "evidence_fallback",
+          clipPath: candidate.clip_path ?? null,
         }].sort((a, b) => a.startMs - b.startMs),
       };
     }
@@ -335,6 +345,7 @@ export default function App() {
             {displayedCandidates.map((candidate, index) => (
               <article className="candidate-row" key={`${candidate.peakMs}-${index}`}>
                 <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
+                <div className="candidate-title"><strong>{candidate.title}</strong><span>{candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span></div>
                 <div className="candidate-times">
                   <span><small>START</small>{formatTimestamp(candidate.startMs)}</span>
                   <span className="peak-time"><small>PEAK</small>{formatTimestamp(candidate.peakMs)}</span>
@@ -343,6 +354,7 @@ export default function App() {
                 <div className="candidate-score"><strong>{candidate.score}</strong><span>PRIORITY</span></div>
                 <p className="candidate-explanation">{candidate.explanation}</p>
                 <div className="signal-list">{candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}</div>
+                {candidate.clipPath && <p className="clip-saved">MP4 SAVED · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
               </article>
             ))}
           </div>

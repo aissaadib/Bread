@@ -1,6 +1,6 @@
 # Luna — local stream analyzer
 
-Luna analyzes local gaming recordings and returns ranked timestamp suggestions. V0.1 accepts local MP4, MKV, and WebM files. It does not download platform streams, edit video, render clips, or upload media.
+Luna analyzes local gaming recordings, returns ranked timestamp suggestions, and saves each suggested segment as an MP4. It accepts local MP4, MKV, and WebM files and does not download platform streams or upload media.
 
 ## Architecture
 
@@ -19,6 +19,7 @@ The frontend stays responsive while Rust reads worker events on a background thr
 - Sample video at 0.5 fps and 160×90 resolution, then measure adjacent frame changes.
 - Combine and rank audio events with speech, transcript, and visual evidence where available; clamp and merge timestamp candidates.
 - Show live worker stages/progress, cancel an analysis, view results, and reopen saved analysis history.
+- Export each detected segment as an MP4 in `Downloads/<source video name>/`, with a descriptive title in the filename and results list.
 - Recover unfinished jobs as failed after an app restart.
 
 The score is a transparent ranking aid, not a probability of a true highlight. A large visual change alone is not enough to create a candidate.
@@ -32,6 +33,10 @@ On this Windows machine (20 logical processors, 15.7 GiB available to the runtim
 The baseline audio/video path runs without AI packages. Silero VAD activates when the `silero-vad` package is installed. Faster-Whisper activates only when `LUNA_WHISPER_MODEL` points to a complete local CTranslate2 model folder. The app uses CPU int8 and `local_files_only=True`; it never downloads a model automatically. Optional package requirements are in `worker/requirements-optional.txt`.
 
 Luna looks for Python 3.11+ in common Windows install locations and through the `py -3`, `python3`, and `python` commands. For a non-standard installation, set `LUNA_PYTHON` to the Python executable path before starting Luna. FFmpeg and FFprobe must be on `PATH`.
+
+## Optional local AI clip titles
+
+For AI-generated clip titles, run a local Ollama-compatible service and set `LUNA_TITLE_MODEL` to an installed model name before starting Luna. The default endpoint is `http://127.0.0.1:11434/api/generate`; `LUNA_TITLE_ENDPOINT` can point to another localhost endpoint. Luna sends only the clip's short transcript and analysis evidence to that local service. If no model responds, Luna still saves the clip with a descriptive title based on the detected signals and timestamp.
 
 ## Requirements
 
@@ -70,5 +75,5 @@ The worker tests generate small synthetic files under `.test-output` and remove 
 - VAD and transcription depend on optional local packages/models. The app remains useful without them.
 - Generic audio anomalies and frame changes are only clues; the initial detector is not game-specific and has no calibrated real-world accuracy.
 - One analysis runs at a time. The worker decodes the source separately for audio and video.
-- No actual clip trimming/export, subtitles, cloud sources, account integration, or platform stream downloading.
+- No subtitles, cloud sources, account integration, or platform stream downloading. Clip title quality depends on the optional local model; evidence titles are used when it is unavailable.
 - The Windows release executable builds, but the UI, picker, and full Tauri-to-worker workflow have not been launched interactively. Compile checks and worker integration tests do not verify WebView behavior.

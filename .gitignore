@@ -6,6 +6,11 @@ src-tauri/gen/
 .npm-cache/
 .cargo-cache/
 .test-output/
+.build-*/
+.build-final/
+.build-next/
+.runtime/
+.dist/
 .torch-cache/
 .venv/
 __pycache__/
