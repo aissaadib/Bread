@@ -296,6 +296,7 @@ fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut chil
             }
         }
     }
+    drop(output_receiver);
     let exit = child.wait();
     let _ = stdout_thread.join();
     let diagnostics = stderr_thread.join().unwrap_or_default();
