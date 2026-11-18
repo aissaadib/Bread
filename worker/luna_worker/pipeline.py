@@ -17,14 +17,20 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
     speech: list[dict] = []
 
     emit("stage", stage="analyzing_audio", progress=4)
-    audio_observations, speech, notice = audio.analyze(
-        path, info["has_audio"], info["duration_seconds"], cancelled,
-        lambda percent: emit("progress", stage="analyzing_audio", progress=4 + int(percent * 0.46)),
-        config,
-    )
-    observations.extend(audio_observations)
-    if notice:
-        notices.append(notice)
+    audio_tracks = max(1, int(info["audio_tracks"]))
+    for stream_index in range(audio_tracks if info["has_audio"] else 1):
+        audio_observations, speech_intervals, notice = audio.analyze(
+            path, info["has_audio"], info["duration_seconds"], cancelled,
+            lambda percent, index=stream_index: emit(
+                "progress", stage="analyzing_audio",
+                progress=4 + int(((index + percent / 100) / audio_tracks) * 46),
+            ),
+            config, audio_stream_index=stream_index,
+        )
+        observations.extend(audio_observations)
+        speech.extend(speech_intervals)
+        if notice and notice not in notices:
+            notices.append(notice)
 
     if cancelled.is_set():
         raise InterruptedError("Analysis cancelled.")

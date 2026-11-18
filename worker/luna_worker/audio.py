@@ -75,7 +75,8 @@ def _speech_intervals(raw: bytearray, offset_seconds: float, detector, model, to
 
 
 def analyze(path: str, has_audio: bool, duration_seconds: float, cancelled: threading.Event,
-            progress: Callable[[float], None], config: dict | None = None) -> tuple[list[dict], list[dict], str | None]:
+            progress: Callable[[float], None], config: dict | None = None,
+            audio_stream_index: int = 0) -> tuple[list[dict], list[dict], str | None]:
     if cancelled.is_set():
         raise InterruptedError("Analysis cancelled.")
     if not has_audio:
@@ -87,7 +88,7 @@ def analyze(path: str, has_audio: bool, duration_seconds: float, cancelled: thre
 
     command = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
-        "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "pipe:1",
+        "-map", f"0:a:{audio_stream_index}", "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "pipe:1",
     ]
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=window_bytes * 2)
