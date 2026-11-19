@@ -159,7 +159,6 @@ export type AiAssessmentItem = {
   windowStartMs: number;
   windowEndMs: number;
   origin: string;
-  localScore: number;
   isHighlight: boolean;
   eventType: string;
   interestScore: number;
@@ -168,12 +167,9 @@ export type AiAssessmentItem = {
   aiTitle: string | null;
   focusX: number | null;
   focusY: number | null;
-  focusConfidence: number;
+  mostlyMenu: boolean | null;
   combinedScore: number;
-  combinedLabel: string;
   model: string;
-  segmentOffsetSeconds: number | null;
-  evidence: string;
   rejected?: boolean;
   code?: string;
   message?: string;

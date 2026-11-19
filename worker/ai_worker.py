@@ -24,12 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from luna_worker import ai, media
-from luna_worker.gemini import (
-    GeminiClient,
-    GeminiError,
-    QuotaExceededError,
-    RateLimitedError,
-)
+from luna_worker.gemini import GeminiClient, GeminiError, RateLimitedError
 
 _lock = threading.Lock()
 
@@ -48,9 +43,8 @@ class Cancelled(Exception):
 
 
 def send(event_type: str, **data: Any) -> None:
-    message = {"type": event_type, **data}
-    # ASCII escapes keep the protocol encoding-independent.
-    line = json.dumps(message, separators=(",", ":"), ensure_ascii=True) + "\n"
+    line = json.dumps({"type": event_type, **data}, separators=(",", ":"),
+                      ensure_ascii=True) + "\n"
     with _lock:
         sys.stdout.write(line)
         sys.stdout.flush()
@@ -60,7 +54,7 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _read_key(stream, timeout_seconds: float = 20.0) -> str:
+def read_key(stream, timeout_seconds: float = 20.0) -> str:
     """Block until the host sends the API key as the first control line."""
     holder: dict[str, Any] = {}
     ready = threading.Event()
@@ -72,11 +66,9 @@ def _read_key(stream, timeout_seconds: float = 20.0) -> str:
             line = ""
         if line:
             try:
-                payload = json.loads(line)
-                holder["key"] = str(payload.get("apiKey") or "")
+                holder["key"] = str(json.loads(line).get("apiKey") or "")
             except (json.JSONDecodeError, AttributeError):
                 holder["key"] = ""
-        holder["eof"] = True
         ready.set()
 
     threading.Thread(target=reader, daemon=True).start()
@@ -85,7 +77,8 @@ def _read_key(stream, timeout_seconds: float = 20.0) -> str:
     return (holder.get("key") or "").strip()
 
 
-def _start_cancel_listener(stream, cancelled: threading.Event) -> None:
+def watch_for_cancel(stream, cancelled: threading.Event) -> None:
+    """Consume control lines after the key; EOF also means the host is gone."""
     def reader() -> None:
         for line in stream:
             try:
@@ -93,8 +86,7 @@ def _start_cancel_listener(stream, cancelled: threading.Event) -> None:
             except json.JSONDecodeError:
                 continue
             if command.get("command") == "cancel":
-                cancelled.set()
-                return
+                break
         cancelled.set()
 
     threading.Thread(target=reader, daemon=True).start()
@@ -114,7 +106,7 @@ def extract_segment(source: str, info: dict[str, Any], window: dict[str, Any],
     height = int(info.get("display_height") or info.get("height") or 0)
     if width < 2 or height < 2:
         raise media.MediaError("video_track_missing", "The recording has no usable video dimensions.")
-    target_width = min(max(240, int(max_width)), width if width > 0 else max_width)
+    target_width = min(max(240, int(max_width)), width)
     target_height = _even(target_width * height / width)
     command = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -129,11 +121,15 @@ def extract_segment(source: str, info: dict[str, Any], window: dict[str, Any],
     result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
     if result.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
         detail = (result.stderr or "").strip()[-300:]
-        raise media.MediaError(
-            "segment_failed",
-            f"The analysis segment could not be cut. {detail}".strip(),
-        )
+        raise media.MediaError("segment_failed",
+                               f"The analysis segment could not be cut. {detail}".strip())
     return destination
+
+
+def _progress(index: int, total: int, fraction: float) -> int:
+    if total <= 0:
+        return 0
+    return int(max(0.0, min(100.0, ((index + fraction) / total) * 100.0)))
 
 
 def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
@@ -147,15 +143,13 @@ def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
     try:
         send("ai_progress", stage="extracting", progress=_progress(index, total, 0.0),
              window=index, total=total)
-        extract_segment(source, info, window, segment,
-                        int(options["segment_max_width"]))
+        extract_segment(source, info, window, segment, int(options["segment_max_width"]))
         if cancelled.is_set():
             raise Cancelled()
 
         send("ai_progress", stage="uploading", progress=_progress(index, total, 0.35),
              window=index, total=total)
-        file_info = client.upload_file(str(segment), "video/mp4",
-                                       f"luna-window-{index:02d}.mp4")
+        file_info = client.upload_file(str(segment), "video/mp4", f"luna-window-{index:02d}.mp4")
         remote_name = file_info.get("name", "")
         file_info = client.wait_until_active(file_info)
         file_uri = file_info.get("uri") or remote_name
@@ -169,15 +163,11 @@ def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
              window=index, total=total)
         raw = client.assess(file_uri, "video/mp4", ai.build_prompt(window))
         assessment = ai.parse_assessment(raw, window)
-        assessment["model"] = client.model
-        combined, label = ai.fuse(int(window.get("local_score", 0)), assessment, options)
-        item = {
+        return {
             "candidateId": window.get("candidate_id"),
             "windowStartMs": int(window["start_ms"]),
             "windowEndMs": int(window["end_ms"]),
             "origin": window.get("origin", "candidate"),
-            "localScore": int(window.get("local_score", 0)),
-            "localSignals": window.get("local_signals", []),
             "isHighlight": assessment["is_highlight"],
             "eventType": assessment["event_type"],
             "interestScore": assessment["interest_score"],
@@ -186,37 +176,35 @@ def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
             "aiTitle": ai.build_title(assessment),
             "focusX": assessment["focus_x"],
             "focusY": assessment["focus_y"],
-            "focusConfidence": assessment["focus_confidence"],
             "mostlyMenu": assessment["mostly_menu"],
-            "visuallyClear": assessment["visually_clear"],
-            "combinedScore": combined,
-            "combinedLabel": label,
-            "model": assessment["model"],
-            "segmentOffsetSeconds": assessment["segment_relative_offset_seconds"],
-            "evidence": ai.summarize_evidence(assessment),
+            "combinedScore": ai.fuse(int(window.get("local_score", 0)), assessment, options),
+            "model": client.model,
         }
-        return item
     finally:
         if remote_name:
-            send("ai_progress", stage="cleaning", progress=_progress(index, total, 0.95),
-                 window=index, total=total)
-            if client.delete_file(remote_name):
-                send("ai_progress", stage="cleaned", progress=_progress(index, total, 1.0),
-                     window=index, total=total)
+            client.delete_file(remote_name)
         segment.unlink(missing_ok=True)
 
 
-def _progress(index: int, total: int, fraction: float) -> int:
-    if total <= 0:
-        return 0
-    return int(max(0.0, min(100.0, ((index + fraction) / total) * 100.0)))
+def _finish(job_id: str, model: str, total: int, assessed: int, failed: int, rejected: int,
+            **flags: Any) -> None:
+    send("ai_complete", jobId=job_id, assessed=assessed, failed=failed, rejected=rejected,
+         total=total, model=model, **flags)
+
+
+def _reject(job_id: str, window: dict[str, Any], code: str, message: str) -> None:
+    send("ai_item", jobId=job_id, item={
+        "candidateId": window.get("candidate_id"),
+        "windowStartMs": int(window["start_ms"]),
+        "windowEndMs": int(window["end_ms"]),
+        "rejected": True, "code": code, "message": message,
+    })
 
 
 def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
         client_factory=None) -> int:
     options = ai.settings({"ai": request.get("ai") or {}})
     job_id = str(request.get("jobId") or "")
-    model = str(request.get("model") or options["model"])
 
     if not request.get("enabled", True):
         send("error", jobId=job_id, code="cloud_disabled",
@@ -229,105 +217,61 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
         return 1
 
     source = str(request.get("source") or "")
-    duration_ms = int(request.get("durationMs") or 0)
-    windows = ai.plan_windows(request.get("candidates") or [], duration_ms, options)
+    windows = ai.plan_windows(request.get("candidates") or [],
+                              int(request.get("durationMs") or 0), options)
+    model = str(request.get("model") or options["model"])
     if not windows:
-        send("ai_complete", jobId=job_id, assessed=0, failed=0, rejected=0, total=0,
-             model=model, requests=0, message="No candidate windows were available for review.")
+        _finish(job_id, model, 0, 0, 0, 0,
+                message="No candidate windows were available for review.")
         return 0
 
     try:
         info = media.inspect_media(source)
-    except media.MediaError as error:
+        client = (client_factory or GeminiClient)(
+            api_key, model,
+            timeout_seconds=float(options["request_timeout_seconds"]),
+            max_retries=int(options["max_retries"]))
+    except (media.MediaError, GeminiError) as error:
         send("error", jobId=job_id, code=error.code, message=str(error))
         return 1
 
-    factory = client_factory or GeminiClient
-    try:
-        client = factory(api_key, model,
-                         timeout_seconds=float(options["request_timeout_seconds"]),
-                         max_retries=int(options["max_retries"]))
-    except GeminiError as error:
-        send("error", jobId=job_id, code=error.code, message=str(error))
-        return 1
-
-    send("ai_started", jobId=job_id, total=len(windows), model=client.model)
-    assessed = 0
-    failed = 0
-    rejected = 0
+    total = len(windows)
+    send("ai_started", jobId=job_id, total=total, model=client.model)
+    assessed = failed = rejected = 0
 
     with tempfile.TemporaryDirectory(prefix="luna-ai-") as temporary_name:
         temporary = Path(temporary_name)
         for index, window in enumerate(windows):
-            if cancelled.is_set():
-                send("ai_complete", jobId=job_id, assessed=assessed, failed=failed,
-                     rejected=rejected, total=len(windows), model=client.model,
-                     requests=getattr(client, "requests_made", 0),
-                     cancelled=True,
-                     message="Cloud analysis was stopped. Local results are unchanged.")
-                return 2
             try:
+                if cancelled.is_set():
+                    raise Cancelled()
                 item = assess_window(client, source, info, window, temporary, options,
-                                     cancelled, index, len(windows))
+                                     cancelled, index, total)
                 assessed += 1
                 send("ai_item", jobId=job_id, item=item)
             except Cancelled:
-                send("ai_complete", jobId=job_id, assessed=assessed, failed=failed,
-                     rejected=rejected, total=len(windows), model=client.model,
-                     requests=getattr(client, "requests_made", 0), cancelled=True,
-                     message="Cloud analysis was stopped. Local results are unchanged.")
+                _finish(job_id, client.model, total, assessed, failed, rejected,
+                        cancelled=True,
+                        message="Cloud analysis was stopped. Local results are unchanged.")
                 return 2
-            except QuotaExceededError as error:
-                send("ai_complete", jobId=job_id, assessed=assessed, failed=failed,
-                     rejected=rejected, total=len(windows), model=client.model,
-                     requests=getattr(client, "requests_made", 0), rateLimited=True,
-                     message=str(error))
-                return 1
             except RateLimitedError as error:
-                send("ai_complete", jobId=job_id, assessed=assessed, failed=failed,
-                     rejected=rejected, total=len(windows), model=client.model,
-                     requests=getattr(client, "requests_made", 0), rateLimited=True,
-                     message=str(error))
+                _finish(job_id, client.model, total, assessed, failed, rejected,
+                        rateLimited=True, message=str(error))
                 return 1
-            except GeminiError as error:
-                failed += 1
-                send("ai_item", jobId=job_id, item={
-                    "candidateId": window.get("candidate_id"),
-                    "windowStartMs": int(window["start_ms"]),
-                    "windowEndMs": int(window["end_ms"]),
-                    "rejected": True, "code": error.code, "message": str(error),
-                })
             except ai.AssessmentError as error:
                 rejected += 1
-                send("ai_item", jobId=job_id, item={
-                    "candidateId": window.get("candidate_id"),
-                    "windowStartMs": int(window["start_ms"]),
-                    "windowEndMs": int(window["end_ms"]),
-                    "rejected": True, "code": error.code, "message": str(error),
-                })
-            except (media.MediaError, OSError) as error:
+                _reject(job_id, window, error.code, str(error))
+            except GeminiError as error:
                 failed += 1
-                send("ai_item", jobId=job_id, item={
-                    "candidateId": window.get("candidate_id"),
-                    "windowStartMs": int(window["start_ms"]),
-                    "windowEndMs": int(window["end_ms"]),
-                    "rejected": True, "code": "segment_failed", "message": str(error),
-                })
-            except Exception as error:  # Defensive: an optional step must not crash the app.
+                _reject(job_id, window, error.code, str(error))
+            except Exception as error:  # An optional step must never crash the app.
                 log(f"Unexpected cloud analysis failure: {traceback.format_exc()}")
                 failed += 1
-                send("ai_item", jobId=job_id, item={
-                    "candidateId": window.get("candidate_id"),
-                    "windowStartMs": int(window["start_ms"]),
-                    "windowEndMs": int(window["end_ms"]),
-                    "rejected": True, "code": "unexpected_error",
-                    "message": f"This window could not be assessed ({type(error).__name__}).",
-                })
+                _reject(job_id, window, getattr(error, "code", "unexpected_error"),
+                        str(error))
 
-    send("ai_complete", jobId=job_id, assessed=assessed, failed=failed, rejected=rejected,
-         total=len(windows), model=client.model,
-         requests=getattr(client, "requests_made", 0),
-         message=None if assessed else "Gemini returned no usable assessments.")
+    _finish(job_id, client.model, total, assessed, failed, rejected,
+            message=None if assessed else "Gemini returned no usable assessments.")
     return 0
 
 
@@ -338,19 +282,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Only verify that the stored key can reach the model")
     args = parser.parse_args(argv)
 
+    api_key = read_key(sys.stdin)
     cancelled = threading.Event()
-    api_key = _read_key(sys.stdin)
-    _start_cancel_listener(sys.stdin, cancelled)
+    watch_for_cancel(sys.stdin, cancelled)
 
     if args.test_connection:
-        model = os.environ.get("LUNA_AI_MODEL")
         try:
-            client = GeminiClient(api_key, model)
-        except GeminiError as error:
-            send("test", ok=False, code=error.code, message=str(error))
-            return 1
-        try:
-            result = client.test_connection()
+            result = GeminiClient(api_key, os.environ.get("LUNA_AI_MODEL")).test_connection()
         except GeminiError as error:
             send("test", ok=False, code=error.code, message=str(error))
             return 1
@@ -360,23 +298,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.request:
         parser.error("--request is required unless --test-connection is used")
 
-    request_path = Path(args.request)
     try:
-        request = json.loads(request_path.read_text(encoding="utf-8"))
+        request = json.loads(Path(args.request).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         send("error", jobId="", code="bad_request",
              message=f"The cloud analysis request could not be read: {error}")
         return 1
-    finally:
-        request_path.unlink(missing_ok=True)
 
-    try:
-        return run(request, api_key, cancelled)
-    except Exception as error:  # Never leave the host without a terminal event.
-        log(f"Cloud analysis worker crashed: {traceback.format_exc()}")
-        send("error", jobId=str(request.get("jobId") or ""), code="worker_crashed",
-             message=f"Cloud analysis stopped unexpectedly ({type(error).__name__}).")
-        return 1
+    return run(request, api_key, cancelled)
 
 
 if __name__ == "__main__":

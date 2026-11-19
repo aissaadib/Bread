@@ -66,10 +66,6 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["is_highlight", "event_type", "interest_score", "reason"],
-    "propertyOrdering": [
-        "is_highlight", "event_type", "interest_score", "peak_offset_seconds",
-        "reason", "visually_clear", "mostly_menu", "visual_focus",
-    ],
 }
 
 HIGHLIGHT_DEFINITION = (
@@ -84,7 +80,6 @@ HIGHLIGHT_DEFINITION = (
 
 DEFAULTS: dict[str, Any] = {
     "model": DEFAULT_MODEL,
-    "enabled": False,
     "max_windows": 6,
     "window_seconds": 22,
     "segment_seconds": 30,
@@ -95,7 +90,6 @@ DEFAULTS: dict[str, Any] = {
     "low_confidence_score": 45,
     "max_low_confidence_windows": 2,
     "segment_max_width": 720,
-    "segment_fps": 30,
     "request_timeout_seconds": 150,
     "max_retries": 3,
     "local_weight": 0.6,
@@ -370,7 +364,6 @@ def parse_assessment(
     focus = payload.get("visual_focus")
     focus_x: float | None = None
     focus_y: float | None = None
-    focus_confidence = 0.0
     if isinstance(focus, dict):
         raw_x, raw_y = focus.get("x"), focus.get("y")
         if (
@@ -380,54 +373,39 @@ def parse_assessment(
         ):
             focus_x = round(float(raw_x), 4)
             focus_y = round(float(raw_y), 4)
-            focus_confidence = 0.5
 
     return {
         "is_highlight": is_highlight,
         "event_type": event_type if is_highlight else "none",
         "interest_score": interest,
         "peak_ms": peak_ms,
-        "peak_offset_seconds": None if peak_ms is None else round((peak_ms - start_ms) / 1000.0, 3),
         "reason": reason,
-        "visually_clear": bool(payload.get("visually_clear")) if isinstance(
-            payload.get("visually_clear"), bool) else None,
         "mostly_menu": bool(payload.get("mostly_menu")) if isinstance(
             payload.get("mostly_menu"), bool) else None,
         "focus_x": focus_x,
         "focus_y": focus_y,
-        "focus_confidence": focus_confidence,
-        "window_start_ms": start_ms,
-        "window_end_ms": end_ms,
-        "window_duration_seconds": round(duration_seconds, 3),
-        "segment_relative_offset_seconds": None if peak_ms is None else round(
-            (peak_ms - start_ms) / 1000.0, 3),
     }
 
 
 def fuse(local_score: int, assessment: dict[str, Any] | None,
-         config: dict[str, Any] | None = None) -> tuple[int, str]:
+         config: dict[str, Any] | None = None) -> int:
     """Combine the local ranking score with semantic evidence.
 
     The local detector stays the baseline: without an assessment the score is
     untouched, and a locally strong visual-only highlight is never discarded
     just because the model was unsure about audio or speech.
     """
-    options = settings(config)
     local = int(_clamp(float(local_score), 0.0, 100.0))
     if not assessment:
-        return local, "Local analysis only"
-    if assessment.get("is_highlight"):
-        local_weight = float(options["local_weight"])
-        ai_weight = float(options["ai_weight"])
-        combined = int(round(_clamp(local * local_weight + assessment["interest_score"] * ai_weight,
-                                    0.0, 100.0)))
-        label = f"Local {local} + AI {assessment['interest_score']}"
-        if assessment.get("mostly_menu"):
-            combined = int(round(combined * 0.7))
-            label += " (AI saw mostly menus)"
-        return combined, label
-    demoted = int(round(local * 0.45))
-    return demoted, f"Local {local}, AI found no highlight"
+        return local
+    if not assessment.get("is_highlight"):
+        return int(round(local * 0.45))
+    options = settings(config)
+    combined = local * float(options["local_weight"]) + assessment["interest_score"] * float(
+        options["ai_weight"])
+    if assessment.get("mostly_menu"):
+        combined *= 0.7
+    return int(round(_clamp(combined, 0.0, 100.0)))
 
 
 def build_title(assessment: dict[str, Any]) -> str | None:
@@ -442,17 +420,3 @@ def build_title(assessment: dict[str, Any]) -> str | None:
     if short.lower().startswith(label.lower()):
         return short
     return f"{label} — {short}"
-
-
-def summarize_evidence(assessment: dict[str, Any]) -> str:
-    """One-line provenance string stored with the candidate."""
-    bits = [
-        f"Gemini {assessment.get('model', '')}".strip(),
-        f"{EVENT_LABELS.get(assessment.get('event_type', 'other'), 'Highlight')}",
-        f"interest {assessment.get('interest_score')}",
-    ]
-    if assessment.get("mostly_menu"):
-        bits.append("mostly menus")
-    if assessment.get("visually_clear") is False:
-        bits.append("unclear visuals")
-    return " · ".join(bit for bit in bits if bit)

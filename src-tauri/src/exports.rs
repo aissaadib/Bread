@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -14,12 +14,12 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 
+use crate::workers::{spawn_line_reader, spawn_stderr_reader};
 use crate::{logic, resolve_export_worker, resolve_python, storage::NewExportRow, AppState};
 
 const MAX_BATCH_ITEMS: usize = 50;
 const EXPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const EXPORT_MAX_RUNTIME: Duration = Duration::from_secs(2 * 60 * 60);
-const MAX_MESSAGE_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,42 +303,8 @@ fn monitor_export(app: AppHandle, state: Arc<AppState>, batch_id: String, mut ch
                   stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static,
                   cancelling: Arc<AtomicBool>, request_path: PathBuf) {
     let (sender, receiver) = mpsc::sync_channel(64);
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = Vec::new();
-            match reader.by_ref().take((MAX_MESSAGE_BYTES + 1) as u64).read_until(b'\n', &mut line) {
-                Ok(0) => break,
-                Ok(length) if length <= MAX_MESSAGE_BYTES && line.last() == Some(&b'\n') => {
-                    if sender.send(Ok(line)).is_err() { break; }
-                }
-                Ok(_) => {
-                    let _ = sender.send(Err("Export worker message exceeded the size limit.".to_string()));
-                    break;
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(format!("Could not read export progress: {error}")));
-                    break;
-                }
-            }
-        }
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        let mut chunk = [0_u8; 4096];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(length) if bytes.len() < 16_384 => {
-                    let retained = length.min(16_384 - bytes.len());
-                    bytes.extend_from_slice(&chunk[..retained]);
-                }
-                Ok(_) => {}
-            }
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
+    spawn_line_reader(stdout, sender, "export worker");
+    let stderr_thread = spawn_stderr_reader(stderr);
 
     let mut terminal = false;
     let mut invalid_message = None;

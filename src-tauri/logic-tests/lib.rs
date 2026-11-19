@@ -123,11 +123,11 @@ mod tests {
 
         database.apply_ai_item("job-1", &json!({
             "candidateId": 1, "windowStartMs": 25_000, "windowEndMs": 36_733,
-            "origin": "candidate", "localScore": 31, "isHighlight": true,
+            "origin": "candidate", "isHighlight": true,
             "eventType": "goal", "interestScore": 91, "peakMs": 35_200,
             "reason": "A goal is scored after a strong offensive play.",
             "aiTitle": "Goal - A goal is scored after a strong offensive play.",
-            "focusX": 0.52, "focusY": 0.48, "focusConfidence": 0.5,
+            "focusX": 0.52, "focusY": 0.48,
             "combinedScore": 73, "model": "gemini-3.8-flash"
         })).unwrap();
 
@@ -145,11 +145,11 @@ mod tests {
         // A sampled window that Gemini found a highlight in becomes a new candidate.
         database.apply_ai_item("job-1", &json!({
             "candidateId": null, "windowStartMs": 100_000, "windowEndMs": 120_000,
-            "origin": "sample", "localScore": 0, "isHighlight": true,
+            "origin": "sample", "isHighlight": true,
             "eventType": "funny_moment", "interestScore": 74, "peakMs": 110_000,
             "reason": "A glitch throws the player across the map.",
             "aiTitle": "Funny moment - A glitch throws the player across the map.",
-            "focusX": null, "focusY": null, "focusConfidence": 0,
+            "focusX": null, "focusY": null,
             "combinedScore": 30, "model": "gemini-3.8-flash"
         })).unwrap();
         let after = database.candidates("job-1").unwrap();

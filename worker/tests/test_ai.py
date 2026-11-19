@@ -20,7 +20,7 @@ from luna_worker.gemini import (
     GeminiClient,
     GeminiError,
     MissingKeyError,
-    QuotaExceededError,
+    RateLimitedError,
 )
 
 ARTIFACTS = ROOT / ".test-output" / "ai"
@@ -38,7 +38,6 @@ def valid_reply(**overrides):
         "interest_score": 91,
         "peak_offset_seconds": 12.4,
         "reason": "A goal is scored after a strong offensive play.",
-        "visually_clear": True,
         "mostly_menu": False,
         "visual_focus": {"x": 0.52, "y": 0.48},
     }
@@ -58,7 +57,6 @@ class AssessmentParsingTests(unittest.TestCase):
         self.assertEqual(parsed["event_type"], "goal")
         self.assertEqual(parsed["interest_score"], 91)
         self.assertEqual(parsed["peak_ms"], 112_400)
-        self.assertAlmostEqual(parsed["segment_relative_offset_seconds"], 12.4)
         self.assertAlmostEqual(parsed["focus_x"], 0.52)
 
     def test_fenced_json_is_accepted(self) -> None:
@@ -113,18 +111,15 @@ class AssessmentParsingTests(unittest.TestCase):
 
 class FusionTests(unittest.TestCase):
     def test_local_score_is_untouched_without_ai(self) -> None:
-        self.assertEqual(ai.fuse(31, None), (31, "Local analysis only"))
+        self.assertEqual(ai.fuse(31, None), 31)
 
     def test_ai_highlight_raises_a_strong_local_candidate(self) -> None:
         parsed = ai.parse_assessment(valid_reply(interest_score=90), WINDOW)
-        combined, label = ai.fuse(60, parsed)
-        self.assertEqual(combined, 72)
-        self.assertIn("AI 90", label)
+        self.assertEqual(ai.fuse(60, parsed), 72)
 
     def test_visual_only_highlight_is_not_discarded(self) -> None:
         parsed = ai.parse_assessment(valid_reply(interest_score=80), WINDOW)
-        combined, _ = ai.fuse(31, parsed)
-        self.assertGreater(combined, 31)
+        self.assertGreater(ai.fuse(31, parsed), 31)
 
     def test_ai_rejection_demotes_but_keeps_the_local_candidate(self) -> None:
         parsed = ai.parse_assessment(
@@ -132,9 +127,7 @@ class FusionTests(unittest.TestCase):
                         peak_offset_seconds=None),
             WINDOW,
         )
-        combined, label = ai.fuse(80, parsed)
-        self.assertEqual(combined, 36)
-        self.assertIn("no highlight", label)
+        self.assertEqual(ai.fuse(80, parsed), 36)
 
 
 class WindowPlanningTests(unittest.TestCase):
@@ -212,7 +205,6 @@ class FakeClient:
     def __init__(self, replies=None, *, upload_error: Exception | None = None,
                  assess_error: Exception | None = None, delete_ok: bool = True):
         self.model = "gemini-test"
-        self.requests_made = 0
         self.uploaded: list[str] = []
         self.deleted: list[str] = []
         self.prompts: list[str] = []
@@ -222,7 +214,6 @@ class FakeClient:
         self._delete_ok = delete_ok
 
     def upload_file(self, path, mime_type, display_name):
-        self.requests_made += 1
         if self._upload_error:
             raise self._upload_error
         self.uploaded.append(display_name)
@@ -232,7 +223,6 @@ class FakeClient:
         return {**file_info, "state": "ACTIVE"}
 
     def assess(self, file_uri, mime_type, prompt):
-        self.requests_made += 1
         self.prompts.append(prompt)
         if self._assess_error:
             raise self._assess_error
@@ -290,7 +280,7 @@ class ClientBehaviourTests(unittest.TestCase):
             return 429, {}, b'{"error":{"message":"quota exceeded for free tier"}}'
 
         client = GeminiClient("k", transport=transport, max_retries=3, sleep=lambda _s: None)
-        with self.assertRaises(QuotaExceededError):
+        with self.assertRaises(RateLimitedError):
             client.assess("uri", "video/mp4", "prompt")
 
     def test_bad_key_is_reported_clearly(self) -> None:
@@ -332,6 +322,25 @@ class ClientBehaviourTests(unittest.TestCase):
         self.assertFalse(client.delete_file("files/abc"))
 
 
+class EntryPointTests(unittest.TestCase):
+    """The script itself must run: a missing `__main__` guard once hid every fix."""
+
+    def test_script_starts_reads_the_key_and_reports_a_bad_request(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "worker" / "ai_worker.py"),
+             "--request", str(ARTIFACTS / "missing-request.json")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8",
+        )
+        try:
+            stdout, _ = process.communicate(json.dumps({"apiKey": "k"}) + "\n", timeout=60)
+        finally:
+            process.kill()
+        events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(events[0]["code"], "bad_request")
+
+
 class WorkerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -353,7 +362,6 @@ class WorkerTests(unittest.TestCase):
             "jobId": "job-ai-test",
             "source": str(self.source),
             "durationMs": 40_000,
-            "enabled": True,
             "model": "gemini-3.8-flash",
             "ai": {"max_windows": 1, "max_sample_windows": 0, "window_seconds": 10,
                    "segment_seconds": 12},
@@ -423,7 +431,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(client.deleted, ["files/1"])
 
     def test_rate_limit_stops_early_without_failing_the_batch(self) -> None:
-        client = FakeClient(assess_error=QuotaExceededError("quota used up"))
+        client = FakeClient(assess_error=RateLimitedError("quota used up"))
         code, events = self.run_worker(self.request(), client=client)
         complete = next(event for event in events if event["type"] == "ai_complete")
         self.assertTrue(complete["rateLimited"])
@@ -434,11 +442,6 @@ class WorkerTests(unittest.TestCase):
         code, events = self.run_worker(self.request(), key="")
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["code"], "missing_key")
-
-    def test_cloud_disabled_reports_cloud_disabled(self) -> None:
-        code, events = self.run_worker(self.request(enabled=False), client=FakeClient())
-        self.assertEqual(code, 1)
-        self.assertEqual(events[-1]["code"], "cloud_disabled")
 
     def test_cancellation_emits_no_assessment(self) -> None:
         cancelled = threading.Event()

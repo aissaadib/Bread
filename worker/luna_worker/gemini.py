@@ -12,6 +12,7 @@ suite without a network connection or a real key.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 import urllib.error
@@ -45,20 +46,17 @@ class MissingKeyError(GeminiError):
 
 
 class RateLimitedError(GeminiError):
+    """The free tier refused the request; retrying immediately would not help."""
+
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message, code="rate_limited", status=status, retryable=False)
 
 
-class QuotaExceededError(GeminiError):
-    def __init__(self, message: str):
-        super().__init__(message, code="quota_exceeded", retryable=False)
-
-
 def _urllib_transport(method: str, url: str, headers: dict[str, str],
-                      body: bytes | None) -> tuple[int, dict[str, str], bytes]:
+                      body: bytes | None, timeout: float) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), response.read()
     except urllib.error.HTTPError as error:
         try:
@@ -88,35 +86,27 @@ class GeminiClient:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = max(10.0, float(timeout_seconds))
         self.max_retries = max(0, int(max_retries))
-        self._transport = transport or _urllib_transport
+        self._transport = transport or (
+            lambda method, url, headers, body: _urllib_transport(
+                method, url, headers, body, self.timeout_seconds))
         self._sleep = sleep
-        self.requests_made = 0
 
-    # ------------------------------------------------------------------ HTTP
     def __repr__(self) -> str:  # never leak the key through repr()/logs
         return f"GeminiClient(model={self.model!r})"
 
-    def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        headers = {"x-goog-api-key": self._api_key}
-        if extra:
-            headers.update(extra)
-        return headers
-
+    # ------------------------------------------------------------------ HTTP
     def _call(self, method: str, url: str, *, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               retry_on_429: bool = True) -> tuple[int, dict[str, str], bytes]:
         """Perform a request, retrying transient failures with exponential backoff."""
         delay = 1.5
-        last_error: GeminiError | None = None
         for attempt in range(self.max_retries + 1):
-            self.requests_made += 1
             try:
                 status, response_headers, payload = self._transport(
-                    method, url, self._headers(headers), body)
-            except GeminiError as error:
-                if not error.retryable or attempt >= self.max_retries:
+                    method, url, {"x-goog-api-key": self._api_key, **(headers or {})}, body)
+            except GeminiError:
+                if attempt >= self.max_retries:
                     raise
-                last_error = error
                 self._sleep(delay)
                 delay = min(20.0, delay * 2)
                 continue
@@ -124,18 +114,15 @@ class GeminiClient:
             if status < 300:
                 return status, response_headers, payload
             detail = _safe_error_text(payload)
-            if status == 429:
-                if not retry_on_429 or attempt >= self.max_retries:
-                    if _is_quota(detail):
-                        raise QuotaExceededError(
-                            "Gemini reports the free-tier quota is exhausted. "
-                            "Local analysis still works; try cloud analysis later." )
-                    raise RateLimitedError(
-                        f"Gemini rate limit reached. {detail}".strip(), status=status)
+            if status == 429 and retry_on_429 and attempt < self.max_retries:
                 retry_after = _retry_after_seconds(response_headers)
                 self._sleep(retry_after if retry_after is not None else delay)
                 delay = min(20.0, delay * 2)
                 continue
+            if status == 429:
+                raise RateLimitedError(
+                    ("Gemini reports the free-tier quota is exhausted. Local analysis still "
+                     f"works; try cloud analysis later. {detail}").strip(), status=status)
             if status in RETRYABLE_STATUS and attempt < self.max_retries:
                 self._sleep(delay)
                 delay = min(20.0, delay * 2)
@@ -143,15 +130,14 @@ class GeminiClient:
             if status in (401, 403):
                 raise GeminiError(
                     "Gemini rejected the stored API key. Check that Cloud AI Analysis "
-                    "is enabled and the key is valid.", code="invalid_key",
-                    status=status)
+                    "is enabled and the key is valid.", code="invalid_key", status=status)
             if status == 404:
                 raise GeminiError(
                     f"Gemini model '{self.model}' is not available for this key. {detail}".strip(),
                     code="model_unavailable", status=status)
             raise GeminiError(f"Gemini request failed (HTTP {status}). {detail}".strip(),
                               code="http_error", status=status)
-        raise last_error or GeminiError("Gemini request failed.", code="unknown")
+        raise GeminiError("Gemini request failed.", code="unknown")
 
     def _json(self, method: str, path: str, payload: dict[str, Any] | None = None,
               *, retry_on_429: bool = True) -> Any:
@@ -172,52 +158,48 @@ class GeminiClient:
         """Cheap authenticated call used by the Settings 'Test connection' button."""
         started = time.monotonic()
         data = self._json("GET", f"{API_PATH}/models/{self.model}")
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        name = data.get("name") or f"models/{self.model}"
         return {
             "ok": True,
-            "model": name.split("/")[-1],
+            "model": (data.get("name") or f"models/{self.model}").split("/")[-1],
             "displayName": data.get("displayName"),
-            "latencyMs": elapsed_ms,
+            "latencyMs": int((time.monotonic() - started) * 1000),
         }
 
     def upload_file(self, path: str, mime_type: str, display_name: str) -> dict[str, Any]:
         """Resumable upload of one temporary segment; returns the file resource."""
         try:
+            size = os.path.getsize(path)
             with open(path, "rb") as handle:
-                size = len(handle.read())
-            with open(path, "rb") as handle:
-                init_headers = {
-                    "X-Goog-Upload-Protocol": "resumable",
-                    "X-Goog-Upload-Command": "start",
-                    "X-Goog-Upload-Header-Content-Length": str(size),
-                    "X-Goog-Upload-Header-Content-Type": mime_type,
-                    "Content-Type": "application/json",
-                }
-                body = json.dumps({"file": {"display_name": display_name}}).encode("utf-8")
-                _, headers, payload = self._call(
-                    "POST", f"{self.base_url}{UPLOAD_PATH}", body=body, headers=init_headers)
+                _, headers, _ = self._call(
+                    "POST", f"{self.base_url}{UPLOAD_PATH}",
+                    body=json.dumps({"file": {"display_name": display_name}}).encode("utf-8"),
+                    headers={
+                        "X-Goog-Upload-Protocol": "resumable",
+                        "X-Goog-Upload-Command": "start",
+                        "X-Goog-Upload-Header-Content-Length": str(size),
+                        "X-Goog-Upload-Header-Content-Type": mime_type,
+                        "Content-Type": "application/json",
+                    })
                 upload_url = _header(headers, "x-goog-upload-url")
                 if not upload_url:
                     raise GeminiError("Gemini did not return an upload URL.",
                                       code="upload_failed")
-                upload_headers = {
-                    "X-Goog-Upload-Command": "upload, finalize",
-                    "X-Goog-Upload-Offset": "0",
-                    "Content-Length": str(size),
-                    "Content-Type": mime_type,
-                }
-                _, _, final = self._call("POST", upload_url, body=handle.read(),
-                                        headers=upload_headers)
+                _, _, final = self._call(
+                    "POST", upload_url, body=handle.read(),
+                    headers={
+                        "X-Goog-Upload-Command": "upload, finalize",
+                        "X-Goog-Upload-Offset": "0",
+                        "Content-Length": str(size),
+                        "Content-Type": mime_type,
+                    })
         except OSError as error:
             raise GeminiError(f"The temporary segment could not be read: {error}",
                               code="upload_failed") from error
         try:
-            data = json.loads(final.decode("utf-8"))
+            file_info = json.loads(final.decode("utf-8")).get("file") or {}
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise GeminiError("Gemini returned an unreadable upload response.",
                               code="upload_failed") from error
-        file_info = data.get("file") or {}
         if not file_info.get("name"):
             raise GeminiError("Gemini did not accept the uploaded segment.",
                               code="upload_failed")
@@ -227,17 +209,17 @@ class GeminiClient:
                           timeout_seconds: float = 180.0,
                           poll_seconds: float = 2.0) -> dict[str, Any]:
         name = file_info.get("name", "")
-        state = (file_info.get("state") or "").upper()
+        state = (file_info.get("state") or "ACTIVE").upper()
         deadline = time.monotonic() + max(5.0, timeout_seconds)
-        while state not in ("ACTIVE", "") and time.monotonic() < deadline:
+        while state == "PROCESSING" and time.monotonic() < deadline:
             self._sleep(poll_seconds)
             refreshed = self._json("GET", f"{API_PATH}/{name}")
             state = (refreshed.get("state") or "").upper()
             file_info = {**file_info, **refreshed}
-            if state == "FAILED":
-                raise GeminiError("Gemini could not process the uploaded segment.",
-                                  code="upload_failed")
-        if state not in ("ACTIVE", ""):
+        if state == "FAILED":
+            raise GeminiError("Gemini could not process the uploaded segment.",
+                              code="upload_failed")
+        if state == "PROCESSING":
             raise GeminiError("Gemini did not finish processing the uploaded segment in time.",
                               code="upload_timeout")
         return file_info
@@ -253,7 +235,7 @@ class GeminiClient:
             return False
 
     def assess(self, file_uri: str, mime_type: str, prompt: str) -> str:
-        payload = {
+        data = self._json("POST", f"{API_PATH}/models/{self.model}:generateContent", {
             "contents": [{
                 "role": "user",
                 "parts": [
@@ -266,15 +248,14 @@ class GeminiClient:
                 "responseMimeType": "application/json",
                 "responseSchema": ai.RESPONSE_SCHEMA,
             },
-        }
-        data = self._json("POST", f"{API_PATH}/models/{self.model}:generateContent", payload)
+        })
         candidates = data.get("candidates") or []
         if not candidates:
             blocked = (data.get("promptFeedback") or {}).get("blockReason")
             raise GeminiError(
                 f"Gemini returned no assessment{f' ({blocked})' if blocked else ''}.",
                 code="no_candidate")
-        parts = ((candidates[0].get("content") or {}).get("parts") or [])
+        parts = (candidates[0].get("content") or {}).get("parts") or []
         text = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
         if not text:
             finish = candidates[0].get("finishReason") or "unknown"
@@ -285,10 +266,7 @@ class GeminiClient:
 
 def _header(headers: dict[str, str], name: str) -> str | None:
     lowered = name.lower()
-    for key, value in headers.items():
-        if key.lower() == lowered:
-            return value
-    return None
+    return next((value for key, value in headers.items() if key.lower() == lowered), None)
 
 
 def _retry_after_seconds(headers: dict[str, str]) -> float | None:
@@ -301,11 +279,6 @@ def _retry_after_seconds(headers: dict[str, str]) -> float | None:
         return None
 
 
-def _is_quota(detail: str) -> bool:
-    lowered = (detail or "").lower()
-    return "quota" in lowered or "billing" in lowered or "exceeded" in lowered
-
-
 def _safe_error_text(payload: bytes) -> str:
     """Truncated, key-free error detail for user-facing messages."""
     if not payload:
@@ -316,6 +289,5 @@ def _safe_error_text(payload: bytes) -> str:
         return payload.decode("utf-8", "replace")[:300]
     error = data.get("error") if isinstance(data, dict) else None
     if isinstance(error, dict):
-        message = str(error.get("message") or "")
-        return message[:300]
+        return str(error.get("message") or "")[:300]
     return str(data)[:300]

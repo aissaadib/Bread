@@ -367,12 +367,12 @@ impl Database {
         let ai_title = item.get("aiTitle").and_then(Value::as_str);
         let focus_x = item.get("focusX").and_then(Value::as_f64);
         let focus_y = item.get("focusY").and_then(Value::as_f64);
-        let focus_confidence = item.get("focusConfidence").and_then(Value::as_f64).unwrap_or(0.0);
         let mostly_menu = item.get("mostlyMenu").and_then(Value::as_bool);
-        let visually_clear = item.get("visuallyClear").and_then(Value::as_bool);
         let ai_peak = item.get("peakMs").and_then(Value::as_i64).map(|value| value.clamp(window_start, window_end));
         let candidate_id = item.get("candidateId").and_then(Value::as_i64);
 
+        // Prefer the candidate the host named; otherwise match the model's peak
+        // to a known candidate so an existing highlight is annotated, not doubled.
         let target = match candidate_id {
             Some(id) => self.connection.query_row(
                 "SELECT id FROM candidates WHERE id=?1 AND job_id=?2", params![id, job_id],
@@ -427,14 +427,13 @@ impl Database {
 
         self.connection.execute(
             "INSERT INTO ai_assessments(job_id,candidate_id,window_start_ms,window_end_ms,\
-             is_highlight,event_type,interest_score,peak_ms,reason,mostly_menu,visually_clear,\
-             focus_x,focus_y,focus_confidence,combined_score,origin,model)\
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             is_highlight,event_type,interest_score,peak_ms,reason,mostly_menu,\
+             focus_x,focus_y,combined_score,origin,model)\
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![job_id, target.or(candidate_id), window_start, window_end,
                     if is_highlight { 1 } else { 0 }, event_type, interest, ai_peak, reason,
                     mostly_menu.map(|value| if value { 1 } else { 0 }),
-                    visually_clear.map(|value| if value { 1 } else { 0 }),
-                    focus_x, focus_y, focus_confidence, combined,
+                    focus_x, focus_y, combined,
                     item.get("origin").and_then(Value::as_str).unwrap_or("candidate"), model],
         ).map_err(db_error)?;
         Ok(())

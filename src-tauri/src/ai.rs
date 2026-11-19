@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -19,6 +19,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 
+use crate::workers::{spawn_line_reader, spawn_stderr_reader};
 use crate::{credentials, logic, resolve_ai_worker, resolve_python, storage::Database, AppState};
 
 pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
@@ -32,7 +33,10 @@ pub const SUPPORTED_MODELS: [&str; 4] = [
 const AI_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const AI_MAX_RUNTIME: Duration = Duration::from_secs(45 * 60);
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_MESSAGE_BYTES: usize = 1_048_576;
+const LOCK_UNAVAILABLE: &str = "Database lock is unavailable.";
+const PRIVACY_NOTE: &str = "Cloud AI analysis sends only the short video segments Luna \
+     selects to Google's Gemini API. The free tier may use submitted content to improve \
+     Google's products. Luna's local analysis always works without this feature.";
 
 pub struct ActiveAi {
     pub job_id: String,
@@ -72,32 +76,40 @@ pub struct AiConnectionResult {
     pub latency_ms: Option<u64>,
 }
 
-fn privacy_note() -> String {
-    "Cloud AI analysis sends only the short video segments Luna selects to Google's \
-     Gemini API. The free tier may use submitted content to improve Google's products. \
-     Luna's local analysis always works without this feature."
-        .to_string()
+struct AiConfig {
+    enabled: bool,
+    model: String,
+    max_windows: u32,
+    consent_accepted: bool,
 }
 
-fn read_settings(database: &Database) -> Result<(bool, String, u32, bool), String> {
-    let enabled = database.setting("ai.enabled")?.map(|value| value == "1").unwrap_or(false);
-    let model = database.setting("ai.model")?.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let max_windows = database
-        .setting("ai.maxWindows")?
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(6)
-        .clamp(1, 12);
-    let consent = database.setting("ai.consent")?.map(|value| value == "1").unwrap_or(false);
-    Ok((enabled, model, max_windows, consent))
+impl AiConfig {
+    fn load(database: &Database) -> Result<Self, String> {
+        let flag = |key: &str| -> Result<bool, String> {
+            Ok(database.setting(key)?.is_some_and(|value| value == "1"))
+        };
+        Ok(Self {
+            enabled: flag("ai.enabled")?,
+            model: database.setting("ai.model")?.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            max_windows: database
+                .setting("ai.maxWindows")?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(6)
+                .clamp(1, 12),
+            consent_accepted: flag("ai.consent")?,
+        })
+    }
+}
+
+fn load_config(state: &Arc<AppState>) -> Result<AiConfig, String> {
+    let database = state.database.lock().map_err(|_| LOCK_UNAVAILABLE.to_string())?;
+    AiConfig::load(&database)
 }
 
 pub fn settings(state: &Arc<AppState>) -> Result<AiSettings, String> {
-    let (enabled, model, max_windows, consent) = {
-        let database = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?;
-        read_settings(&database)?
-    };
+    let config = load_config(state)?;
     let has_key = credentials::has_gemini_key();
-    let status = if !enabled {
+    let status = if !config.enabled {
         "disabled"
     } else if !has_key {
         "missing_key"
@@ -105,14 +117,14 @@ pub fn settings(state: &Arc<AppState>) -> Result<AiSettings, String> {
         "ready"
     };
     Ok(AiSettings {
-        enabled,
-        model,
-        max_windows,
-        consent_accepted: consent,
+        enabled: config.enabled,
+        model: config.model,
+        max_windows: config.max_windows,
+        consent_accepted: config.consent_accepted,
         has_key,
         status: status.to_string(),
         supported_models: SUPPORTED_MODELS.iter().map(|value| value.to_string()).collect(),
-        privacy_note: privacy_note(),
+        privacy_note: PRIVACY_NOTE.to_string(),
     })
 }
 
@@ -146,84 +158,84 @@ pub fn clear_key(state: &Arc<AppState>) -> Result<AiSettings, String> {
     settings(state)
 }
 
-/// Spawn the worker in test mode. Nothing is uploaded: the worker only calls the
-/// model metadata endpoint to prove the key is valid.
-pub fn test_connection(app: &AppHandle, state: &Arc<AppState>) -> Result<AiConnectionResult, String> {
-    let model = {
-        let database = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?;
-        read_settings(&database)?.1
-    };
-    let key = credentials::load_gemini_key()?
-        .ok_or_else(|| "Add your own Gemini API key in Cloud AI settings first.".to_string())?;
+/// Build the Python worker command with the isolated, headless environment.
+fn worker_command(app: &AppHandle, args: &[&str]) -> Result<Command, String> {
     let worker = resolve_ai_worker(app)?;
     let (python, python_args) = resolve_python()?;
     let mut command = Command::new(python);
     command
         .args(python_args)
         .arg(worker)
-        .arg("--test-connection")
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .env("LUNA_AI_MODEL", &model);
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+    Ok(command)
+}
+
+/// Hand the key to the worker over stdin: never an argument, environment or file.
+fn send_key(child: &mut Child, key: &str) -> Result<ChildStdin, String> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open the cloud worker control channel.".to_string())?;
+    let line = json!({ "apiKey": key }).to_string();
+    stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not send the API key to the worker: {error}"))?;
+    Ok(stdin)
+}
+
+/// Spawn the worker in test mode. Nothing is uploaded: the worker only calls the
+/// model metadata endpoint to prove the key is valid.
+pub fn test_connection(app: &AppHandle, state: &Arc<AppState>) -> Result<AiConnectionResult, String> {
+    let config = load_config(state)?;
+    let key = credentials::load_gemini_key()?
+        .ok_or_else(|| "Add your own Gemini API key in Cloud AI settings first.".to_string())?;
+    let mut command = worker_command(app, &["--test-connection"])?;
+    command.env("LUNA_AI_MODEL", &config.model);
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the cloud AI worker: {error}"))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        let line = json!({ "apiKey": key }).to_string();
-        let _ = stdin.write_all(line.as_bytes());
-        let _ = stdin.write_all(b"\n");
-        let _ = stdin.flush();
-    }
-    let stdout = child.stdout.take().ok_or_else(|| "Could not read the cloud AI worker output.".to_string())?;
+    let _stdin = send_key(&mut child, &key)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not read the cloud AI worker output.".to_string())?;
     let (sender, receiver) = mpsc::sync_channel(4);
-    thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    spawn_line_reader(stdout, sender, "cloud worker");
     let deadline = Instant::now() + TEST_TIMEOUT;
     let mut result: Option<AiConnectionResult> = None;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(Ok(line)) = receiver.recv_timeout(remaining) else { break };
+        let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
+        if event.get("type").and_then(Value::as_str) != Some("test") {
+            continue;
         }
-        match receiver.recv_timeout(remaining) {
-            Ok(line) => {
-                let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
-                if event.get("type").and_then(Value::as_str) != Some("test") {
-                    continue;
-                }
-                let ok = event.get("ok").and_then(Value::as_bool).unwrap_or(false);
-                result = Some(AiConnectionResult {
-                    ok,
-                    model: event.get("model").and_then(Value::as_str).unwrap_or(&model).to_string(),
-                    message: if ok {
-                        "Connected to Gemini with your key.".to_string()
-                    } else {
-                        event
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Gemini rejected the stored key.")
-                            .to_string()
-                    },
-                    latency_ms: event.get("latencyMs").and_then(Value::as_u64),
-                });
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => break,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+        let ok = event.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        result = Some(AiConnectionResult {
+            ok,
+            model: event.get("model").and_then(Value::as_str).unwrap_or(&config.model).to_string(),
+            message: if ok {
+                "Connected to Gemini with your key.".to_string()
+            } else {
+                event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Gemini rejected the stored key.")
+                    .to_string()
+            },
+            latency_ms: event.get("latencyMs").and_then(Value::as_u64),
+        });
+        break;
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -233,14 +245,11 @@ pub fn test_connection(app: &AppHandle, state: &Arc<AppState>) -> Result<AiConne
 }
 
 pub fn start(app: &AppHandle, state: &Arc<AppState>, job_id: &str) -> Result<(), String> {
-    let (enabled, model, max_windows, consent) = {
-        let database = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?;
-        read_settings(&database)?
-    };
-    if !enabled {
+    let config = load_config(state)?;
+    if !config.enabled {
         return Err("Cloud AI analysis is turned off. Enable it in Cloud AI settings.".into());
     }
-    if !consent {
+    if !config.consent_accepted {
         return Err("Accept the cloud processing notice before analysing with Gemini.".into());
     }
     let key = credentials::load_gemini_key()?
@@ -274,9 +283,8 @@ pub fn start(app: &AppHandle, state: &Arc<AppState>, job_id: &str) -> Result<(),
         "batchId": batch_id,
         "source": job.path,
         "durationMs": job.duration_ms.max(0),
-        "enabled": true,
-        "model": model,
-        "ai": { "max_windows": max_windows, "enabled": true },
+        "model": config.model,
+        "ai": { "max_windows": config.max_windows },
         "candidates": candidates.iter().map(|candidate| json!({
             "id": candidate.id,
             "startMs": candidate.start_ms,
@@ -289,23 +297,8 @@ pub fn start(app: &AppHandle, state: &Arc<AppState>, job_id: &str) -> Result<(),
     fs::write(&request_path, serde_json::to_vec(&request).map_err(|error| error.to_string())?)
         .map_err(|error| format!("Could not write the cloud request: {error}"))?;
 
-    let worker = resolve_ai_worker(app)?;
-    let (python, python_args) = resolve_python()?;
-    let mut command = Command::new(python);
-    command
-        .args(python_args)
-        .arg(worker)
-        .arg("--request")
-        .arg(&request_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("PYTHONDONTWRITEBYTECODE", "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
+    let mut command = worker_command(app, &["--request"])?;
+    command.arg(&request_path);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -313,16 +306,7 @@ pub fn start(app: &AppHandle, state: &Arc<AppState>, job_id: &str) -> Result<(),
             return Err(format!("Could not start the cloud AI worker: {error}"));
         }
     };
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Could not open the cloud worker control channel.".to_string())?;
-    let line = json!({ "apiKey": key }).to_string();
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|error| format!("Could not send the API key to the worker: {error}"))?;
+    let stdin = send_key(&mut child, &key)?;
     let stdout = child.stdout.take().ok_or_else(|| "Could not read cloud progress.".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "Could not read cloud diagnostics.".to_string())?;
     let cancelling = Arc::new(AtomicBool::new(false));
@@ -343,7 +327,7 @@ pub fn start(app: &AppHandle, state: &Arc<AppState>, job_id: &str) -> Result<(),
     }
     {
         let mut database = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?;
-        database.set_job_ai_status(job_id, "running", Some("Reviewing candidate windows"), Some(&model), Some(0))?;
+        database.set_job_ai_status(job_id, "running", Some("Reviewing candidate windows"), Some(&config.model), Some(0))?;
     }
     let app_thread = app.clone();
     let state_thread = Arc::clone(state);
@@ -398,44 +382,8 @@ fn monitor(app: AppHandle, state: Arc<AppState>, job_id: String, mut child: Chil
            stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static,
            cancelling: Arc<AtomicBool>, request_path: PathBuf) {
     let (sender, receiver) = mpsc::sync_channel(64);
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = Vec::new();
-            match reader.by_ref().take((MAX_MESSAGE_BYTES + 1) as u64).read_until(b'\n', &mut line) {
-                Ok(0) => break,
-                Ok(length) if length <= MAX_MESSAGE_BYTES && line.last() == Some(&b'\n') => {
-                    if sender.send(Ok(line)).is_err() {
-                        break;
-                    }
-                }
-                Ok(_) => {
-                    let _ = sender.send(Err("Cloud worker message exceeded the size limit.".to_string()));
-                    break;
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(format!("Could not read cloud progress: {error}")));
-                    break;
-                }
-            }
-        }
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        let mut chunk = [0_u8; 4096];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(length) if bytes.len() < 16_384 => {
-                    let retained = length.min(16_384 - bytes.len());
-                    bytes.extend_from_slice(&chunk[..retained]);
-                }
-                Ok(_) => {}
-            }
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
+    spawn_line_reader(stdout, sender, "cloud worker");
+    let stderr_thread = spawn_stderr_reader(stderr);
 
     let mut terminal = false;
     let mut failure: Option<String> = None;
@@ -567,7 +515,6 @@ fn apply_event(database: &mut Database, job_id: &str, kind: &str, event: &Value)
                 .unwrap_or("Cloud analysis failed. Local results are unchanged.");
             database.set_job_ai_status(job_id, "failed", Some(message), None, None)?;
         }
-        "ai_progress" => {}
         _ => {}
     }
     Ok(())
