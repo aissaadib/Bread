@@ -1,5 +1,5 @@
 {
-  "analysis_version": "0.3.0",
+  "analysis_version": "0.4.0",
   "audio": {
     "sample_rate": 16000,
     "window_seconds": 1,
@@ -36,5 +36,24 @@
       "speech": 15,
       "scene": 10
     }
+  },
+  "ai": {
+    "enabled": false,
+    "model": "gemini-3.8-flash",
+    "max_windows": 6,
+    "window_seconds": 22,
+    "segment_seconds": 30,
+    "pre_roll_seconds": 4,
+    "post_roll_seconds": 6,
+    "sample_every_seconds": 300,
+    "max_sample_windows": 2,
+    "low_confidence_score": 45,
+    "max_low_confidence_windows": 2,
+    "segment_max_width": 720,
+    "segment_fps": 30,
+    "request_timeout_seconds": 150,
+    "max_retries": 3,
+    "local_weight": 0.6,
+    "ai_weight": 0.4
   }
 }

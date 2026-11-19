@@ -57,6 +57,10 @@ pub fn new_export_id() -> String {
     new_prefixed_id("short")
 }
 
+pub fn new_ai_id() -> String {
+    new_prefixed_id("ai")
+}
+
 pub const MIN_CLIP_SECONDS: f64 = 1.0;
 pub const MAX_CLIP_SECONDS: f64 = 180.0;
 

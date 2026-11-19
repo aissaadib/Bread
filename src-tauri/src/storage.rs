@@ -8,6 +8,7 @@ use crate::MediaInfo;
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 const CLIP_EXPORT_SCHEMA: &str = include_str!("../migrations/002_clip_exports.sql");
 const SHORTFORM_EXPORT_SCHEMA: &str = include_str!("../migrations/003_shortform_exports.sql");
+const AI_ANALYSIS_SCHEMA: &str = include_str!("../migrations/004_ai_analysis.sql");
 
 pub(crate) struct Database {
     connection: Connection,
@@ -25,6 +26,11 @@ pub struct HistoryEntry {
     pub created_at: String,
     pub error_message: Option<String>,
     pub notices: Vec<String>,
+    pub ai_status: String,
+    pub ai_error: Option<String>,
+    pub ai_model: Option<String>,
+    pub ai_windows: u32,
+    pub ai_message: Option<String>,
     pub candidates: Vec<HistoryCandidate>,
 }
 
@@ -41,6 +47,15 @@ pub struct HistoryCandidate {
     pub title: String,
     pub title_source: String,
     pub clip_path: Option<String>,
+    pub origin: String,
+    pub ai_title: Option<String>,
+    pub ai_event_type: Option<String>,
+    pub ai_reason: Option<String>,
+    pub ai_score: Option<u8>,
+    pub ai_peak_ms: Option<u64>,
+    pub ai_focus_x: Option<f64>,
+    pub ai_focus_y: Option<f64>,
+    pub combined_score: Option<u8>,
 }
 
 #[derive(Clone, Serialize)]
@@ -118,7 +133,11 @@ impl Database {
             connection.execute_batch(SHORTFORM_EXPORT_SCHEMA).map_err(db_error)?;
             version = 3;
         }
-        if version > 3 {
+        if version == 3 {
+            connection.execute_batch(AI_ANALYSIS_SCHEMA).map_err(db_error)?;
+            version = 4;
+        }
+        if version > 4 {
             return Err(format!("Database version {version} is newer than this Luna build."));
         }
         connection.execute(
@@ -246,7 +265,8 @@ impl Database {
 
     pub(crate) fn history(&self) -> Result<Vec<HistoryEntry>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT j.id,s.name,s.path,j.status,j.stage,j.progress,j.created_at,j.error_message,j.notices_json \
+            "SELECT j.id,s.name,s.path,j.status,j.stage,j.progress,j.created_at,j.error_message,j.notices_json,\
+             j.ai_status,j.ai_error,j.ai_model,j.ai_windows,j.ai_message \
              FROM jobs j JOIN sources s ON s.id=j.source_id ORDER BY j.created_at DESC LIMIT 50",
         ).map_err(db_error)?;
         let entries = statement.query_map([], |row| {
@@ -255,7 +275,10 @@ impl Database {
             Ok(HistoryEntry {
                 id: row.get(0)?, source_name: row.get(1)?, path: row.get(2)?, status: row.get(3)?,
                 stage: row.get(4)?, progress: row.get::<_, i64>(5)?.clamp(0, 100) as u8,
-                created_at: row.get(6)?, error_message: row.get(7)?, notices, candidates: Vec::new(),
+                created_at: row.get(6)?, error_message: row.get(7)?, notices,
+                ai_status: row.get(9)?, ai_error: row.get(10)?, ai_model: row.get(11)?,
+                ai_windows: row.get::<_, i64>(12)?.max(0) as u32, ai_message: row.get(13)?,
+                candidates: Vec::new(),
             })
         }).map_err(db_error)?;
         let mut history = Vec::new();
@@ -267,9 +290,11 @@ impl Database {
         Ok(history)
     }
 
-    fn candidates(&self, job_id: &str) -> Result<Vec<HistoryCandidate>, String> {
+    pub(crate) fn candidates(&self, job_id: &str) -> Result<Vec<HistoryCandidate>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT id,start_ms,peak_ms,end_ms,score,signals_json,explanation,title,title_source,clip_path FROM candidates WHERE job_id=?1 ORDER BY start_ms",
+            "SELECT id,start_ms,peak_ms,end_ms,score,signals_json,explanation,title,title_source,clip_path,\
+             origin,ai_title,ai_event_type,ai_reason,ai_score,ai_peak_ms,ai_focus_x,ai_focus_y,combined_score \
+             FROM candidates WHERE job_id=?1 ORDER BY start_ms",
         ).map_err(db_error)?;
         let rows = statement.query_map([job_id], |row| {
             let raw_signals: String = row.get(5)?;
@@ -282,9 +307,137 @@ impl Database {
                 score: row.get::<_, i64>(4)?.clamp(0, 100) as u8,
                 signals, explanation: row.get(6)?, title: row.get(7)?,
                 title_source: row.get(8)?, clip_path: row.get(9)?,
+                origin: row.get(10)?,
+                ai_title: row.get(11)?,
+                ai_event_type: row.get(12)?,
+                ai_reason: row.get(13)?,
+                ai_score: row.get::<_, Option<i64>>(14)?.map(|value| value.clamp(0, 100) as u8),
+                ai_peak_ms: row.get::<_, Option<i64>>(15)?.map(|value| value.max(0) as u64),
+                ai_focus_x: row.get(16)?,
+                ai_focus_y: row.get(17)?,
+                combined_score: row.get::<_, Option<i64>>(18)?.map(|value| value.clamp(0, 100) as u8),
             })
         }).map_err(db_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+    }
+
+    pub(crate) fn setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection.query_row(
+            "SELECT value FROM app_settings WHERE key=?1", [key], |row| row.get(0),
+        ).optional().map_err(db_error)
+    }
+
+    pub(crate) fn set_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.connection.execute(
+            "INSERT INTO app_settings(key,value) VALUES(?1,?2)\
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            params![key, value],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn set_job_ai_status(&mut self, job_id: &str, status: &str,
+                                    message: Option<&str>, model: Option<&str>,
+                                    windows: Option<i64>) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE jobs SET ai_status=?2, ai_message=COALESCE(?3, ai_message),\
+             ai_model=COALESCE(?4, ai_model), ai_windows=COALESCE(?5, ai_windows),\
+             ai_error=CASE WHEN ?2 IN ('failed','rate_limited') THEN ?3 ELSE NULL END,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![job_id, status, message, model, windows],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    /// Merge one validated cloud assessment with the existing local evidence.
+    /// Local columns are never overwritten; AI evidence gets its own columns.
+    pub(crate) fn apply_ai_item(&mut self, job_id: &str, item: &Value) -> Result<(), String> {
+        if item.get("rejected").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(());
+        }
+        let is_highlight = item.get("isHighlight").and_then(Value::as_bool).unwrap_or(false);
+        let window_start = item.get("windowStartMs").and_then(Value::as_i64).unwrap_or(0).max(0);
+        let window_end = item.get("windowEndMs").and_then(Value::as_i64).unwrap_or(0).max(window_start + 1);
+        let interest = item.get("interestScore").and_then(Value::as_i64).unwrap_or(0).clamp(0, 100);
+        let combined = item.get("combinedScore").and_then(Value::as_i64).unwrap_or(0).clamp(0, 100);
+        let event_type = item.get("eventType").and_then(Value::as_str).unwrap_or("other");
+        let reason = item.get("reason").and_then(Value::as_str).unwrap_or("");
+        let model = item.get("model").and_then(Value::as_str).unwrap_or("gemini");
+        let ai_title = item.get("aiTitle").and_then(Value::as_str);
+        let focus_x = item.get("focusX").and_then(Value::as_f64);
+        let focus_y = item.get("focusY").and_then(Value::as_f64);
+        let focus_confidence = item.get("focusConfidence").and_then(Value::as_f64).unwrap_or(0.0);
+        let mostly_menu = item.get("mostlyMenu").and_then(Value::as_bool);
+        let visually_clear = item.get("visuallyClear").and_then(Value::as_bool);
+        let ai_peak = item.get("peakMs").and_then(Value::as_i64).map(|value| value.clamp(window_start, window_end));
+        let candidate_id = item.get("candidateId").and_then(Value::as_i64);
+
+        let target = match candidate_id {
+            Some(id) => self.connection.query_row(
+                "SELECT id FROM candidates WHERE id=?1 AND job_id=?2", params![id, job_id],
+                |row| row.get::<_, i64>(0),
+            ).optional().map_err(db_error)?,
+            None => None,
+        };
+        let target = match (target, ai_peak) {
+            (Some(id), _) => Some(id),
+            (None, Some(peak)) => self.connection.query_row(
+                "SELECT id FROM candidates WHERE job_id=?1 AND peak_ms BETWEEN ?2 AND ?3 ORDER BY ABS(peak_ms-?4) LIMIT 1",
+                params![job_id, peak - 2000, peak + 2000, peak],
+                |row| row.get::<_, i64>(0),
+            ).optional().map_err(db_error)?,
+            (None, None) => None,
+        };
+
+        if let Some(id) = target {
+            self.connection.execute(
+                "UPDATE candidates SET ai_title=?2, ai_event_type=?3, ai_reason=?4, ai_score=?5,\
+                 ai_peak_ms=?6, ai_focus_x=?7, ai_focus_y=?8, combined_score=?9 WHERE id=?1",
+                params![id, ai_title, event_type, reason, interest, ai_peak,
+                        focus_x, focus_y, combined],
+            ).map_err(db_error)?;
+        } else if is_highlight {
+            if let Some(peak) = ai_peak {
+                let start = window_start.min(peak);
+                let end = window_end.max(peak);
+                let signals = serde_json::json!(["ai_semantic"]).to_string();
+                let evidence = serde_json::json!([]).to_string();
+                let title = ai_title.filter(|value| !value.trim().is_empty()).unwrap_or("AI highlight");
+                let explanation = if reason.trim().is_empty() {
+                    format!("Cloud AI found a {event_type} moment")
+                } else {
+                    format!("Cloud AI: {reason}")
+                };
+                self.connection.execute(
+                    "INSERT INTO candidates(job_id,start_ms,peak_ms,end_ms,score,signals_json,\
+                     evidence_json,explanation,title,title_source,clip_path,origin,ai_title,\
+                     ai_event_type,ai_reason,ai_score,ai_peak_ms,ai_focus_x,ai_focus_y,combined_score)\
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'gemini_cloud',NULL,'gemini',?9,?10,?11,?12,?13,?14,?15,?16)\
+                     ON CONFLICT(job_id,peak_ms) DO UPDATE SET ai_title=excluded.ai_title,\
+                     ai_event_type=excluded.ai_event_type, ai_reason=excluded.ai_reason,\
+                     ai_score=excluded.ai_score, ai_peak_ms=excluded.ai_peak_ms,\
+                     ai_focus_x=excluded.ai_focus_x, ai_focus_y=excluded.ai_focus_y,\
+                     combined_score=excluded.combined_score",
+                    params![job_id, start, peak, end, combined, signals, evidence, explanation,
+                            title, event_type, reason, interest, ai_peak, focus_x, focus_y, combined],
+                ).map_err(db_error)?;
+            }
+        }
+
+        self.connection.execute(
+            "INSERT INTO ai_assessments(job_id,candidate_id,window_start_ms,window_end_ms,\
+             is_highlight,event_type,interest_score,peak_ms,reason,mostly_menu,visually_clear,\
+             focus_x,focus_y,focus_confidence,combined_score,origin,model)\
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![job_id, target.or(candidate_id), window_start, window_end,
+                    if is_highlight { 1 } else { 0 }, event_type, interest, ai_peak, reason,
+                    mostly_menu.map(|value| if value { 1 } else { 0 }),
+                    visually_clear.map(|value| if value { 1 } else { 0 }),
+                    focus_x, focus_y, focus_confidence, combined,
+                    item.get("origin").and_then(Value::as_str).unwrap_or("candidate"), model],
+        ).map_err(db_error)?;
+        Ok(())
     }
 
     pub(crate) fn job_source(&self, job_id: &str) -> Result<Option<JobSource>, String> {

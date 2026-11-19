@@ -1,3 +1,5 @@
+mod ai;
+mod credentials;
 mod exports;
 mod logic;
 mod storage;
@@ -26,6 +28,7 @@ pub(crate) struct AppState {
     pub(crate) database: Mutex<Database>,
     pub(crate) workers: Mutex<HashMap<String, ChildStdin>>,
     pub(crate) export: Mutex<Option<exports::ActiveExport>>,
+    pub(crate) ai: Mutex<Option<ai::ActiveAi>>,
     pub(crate) data_dir: PathBuf,
 }
 
@@ -121,6 +124,44 @@ fn open_short_export(state: State<'_, Arc<AppState>>, export_id: String) -> Resu
 #[tauri::command]
 fn reveal_short_export(state: State<'_, Arc<AppState>>, export_id: String) -> Result<(), String> {
     exports::open_export(state.inner(), &export_id, true)
+}
+
+#[tauri::command]
+fn ai_settings(state: State<'_, Arc<AppState>>) -> Result<ai::AiSettings, String> {
+    ai::settings(state.inner())
+}
+
+#[tauri::command]
+fn save_ai_settings(state: State<'_, Arc<AppState>>, request: ai::SaveAiSettings)
+    -> Result<ai::AiSettings, String> {
+    ai::save_settings(state.inner(), request)
+}
+
+#[tauri::command]
+fn set_gemini_key(state: State<'_, Arc<AppState>>, key: String) -> Result<ai::AiSettings, String> {
+    ai::store_key(state.inner(), &key)
+}
+
+#[tauri::command]
+fn clear_gemini_key(state: State<'_, Arc<AppState>>) -> Result<ai::AiSettings, String> {
+    ai::clear_key(state.inner())
+}
+
+#[tauri::command]
+fn test_ai_connection(app: AppHandle, state: State<'_, Arc<AppState>>)
+    -> Result<ai::AiConnectionResult, String> {
+    ai::test_connection(&app, state.inner())
+}
+
+#[tauri::command]
+fn start_ai_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, job_id: String)
+    -> Result<(), String> {
+    ai::start(&app, state.inner(), &job_id)
+}
+
+#[tauri::command]
+fn cancel_ai_analysis(state: State<'_, Arc<AppState>>, job_id: String) -> Result<(), String> {
+    ai::cancel(state.inner(), &job_id)
 }
 
 #[tauri::command]
@@ -287,6 +328,16 @@ pub(crate) fn resolve_export_worker(app: &AppHandle) -> Result<PathBuf, String> 
         Ok(export_worker)
     } else {
         Err("The bundled short-form export worker could not be located.".into())
+    }
+}
+
+pub(crate) fn resolve_ai_worker(app: &AppHandle) -> Result<PathBuf, String> {
+    let worker = resolve_worker(app)?;
+    let ai_worker = worker.with_file_name("ai_worker.py");
+    if ai_worker.is_file() {
+        Ok(ai_worker)
+    } else {
+        Err("The bundled cloud AI worker could not be located.".into())
     }
 }
 
@@ -511,6 +562,7 @@ pub fn run() {
                 database: Mutex::new(database),
                 workers: Mutex::new(HashMap::new()),
                 export: Mutex::new(None),
+                ai: Mutex::new(None),
                 data_dir,
             }));
             Ok(())
@@ -519,6 +571,8 @@ pub fn run() {
             register_media, list_history, start_analysis, cancel_analysis,
             get_caption_data, default_export_dir, start_short_export, retry_short_export,
             cancel_short_export, list_exports, open_short_export, reveal_short_export,
+            ai_settings, save_ai_settings, set_gemini_key, clear_gemini_key,
+            test_ai_connection, start_ai_analysis, cancel_ai_analysis,
         ])
         .run(tauri::generate_context!())
         .expect("Luna desktop runtime failed");

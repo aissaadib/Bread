@@ -3,7 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import Studio from "./Studio";
-import type { Candidate, HistoryEntry, MediaInfo, StudioClip } from "./types";
+import type {
+  AiConnectionResult,
+  AiEvent,
+  AiSettings,
+  Candidate,
+  HistoryEntry,
+  MediaInfo,
+  StudioClip,
+} from "./types";
 
 type AnalysisEvent = {
   job_id: string;
@@ -128,14 +136,37 @@ function toStudioClip(candidate: Candidate, index: number): StudioClip {
   return {
     key: candidateKey(candidate, index),
     candidateId: candidate.id ?? null,
-    title: candidate.title,
-    peakMs: candidate.peakMs,
+    title: candidate.aiTitle || candidate.title,
+    peakMs: candidate.aiPeakMs ?? candidate.peakMs,
     startMs: candidate.startMs,
     endMs: candidate.endMs,
     detectedStartMs: candidate.startMs,
     detectedEndMs: candidate.endMs,
+    aiFocusX: candidate.aiFocusX ?? null,
+    aiFocusY: candidate.aiFocusY ?? null,
+    aiEventType: candidate.aiEventType ?? null,
   };
 }
+
+const AI_STATUS_LABELS: Record<string, string> = {
+  idle: "NOT RUN",
+  disabled: "LOCAL ONLY",
+  missing_key: "NO KEY",
+  ready: "READY",
+  running: "REVIEWING",
+  completed: "COMPLETED",
+  rate_limited: "RATE LIMITED",
+  failed: "FAILED",
+  cancelled: "STOPPED",
+};
+
+type AiRun = {
+  jobId: string | null;
+  status: string;
+  message: string | null;
+  assessed: number;
+  total: number;
+};
 
 function applyEvent(current: ActiveAnalysis, event: AnalysisEvent): ActiveAnalysis {
   switch (event.type) {
@@ -186,9 +217,15 @@ export default function App() {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [studio, setStudio] = useState<StudioSession | null>(null);
   const [studioBusy, setStudioBusy] = useState(false);
+  const [ai, setAi] = useState<AiSettings | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiConnection, setAiConnection] = useState<AiConnectionResult | null>(null);
+  const [aiRun, setAiRun] = useState<AiRun>({ jobId: null, status: "idle", message: null, assessed: 0, total: 0 });
   const bufferedEvents = useRef(new Map<string, AnalysisEvent[]>());
   const activeJobId = useRef<string | null>(null);
   const studioRef = useRef<HTMLDivElement | null>(null);
+  const keyInputRef = useRef<HTMLInputElement | null>(null);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -196,6 +233,18 @@ export default function App() {
     } catch {
       // The current analysis still works if history cannot be read temporarily.
     }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void invoke<AiSettings>("ai_settings")
+      .then((settings) => {
+        if (!disposed) setAi(settings);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -215,6 +264,65 @@ export default function App() {
       }
       setAnalysis((current) => current.id === payload.job_id ? applyEvent(current, payload) : current);
       if (["complete", "cancelled", "error"].includes(payload.type)) void refreshHistory();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refreshHistory]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<AiEvent>("ai-event", ({ payload }) => {
+      setAiRun((current) => {
+        const jobId = payload.jobId ?? current.jobId;
+        if (payload.type === "ai_started") {
+          return {
+            jobId,
+            status: "running",
+            message: `Reviewing ${payload.total ?? 0} window${payload.total === 1 ? "" : "s"} with ${payload.model ?? "Gemini"}`,
+            assessed: 0,
+            total: payload.total ?? 0,
+          };
+        }
+        if (payload.type === "ai_progress") {
+          return { ...current, jobId, status: "running" };
+        }
+        if (payload.type === "ai_item") {
+          const rejected = payload.item?.rejected;
+          return {
+            ...current,
+            jobId,
+            assessed: current.assessed + (rejected ? 0 : 1),
+            message: rejected ? payload.item?.message ?? current.message : current.message,
+          };
+        }
+        if (payload.type === "ai_complete") {
+          const status = payload.cancelled
+            ? "cancelled"
+            : payload.rateLimited
+              ? "rate_limited"
+              : (payload.assessed ?? 0) > 0
+                ? "completed"
+                : "failed";
+          return {
+            jobId,
+            status,
+            message: payload.message ?? current.message,
+            assessed: payload.assessed ?? current.assessed,
+            total: payload.total ?? current.total,
+          };
+        }
+        if (payload.type === "error") {
+          return { ...current, jobId, status: "failed", message: payload.message ?? "Cloud analysis failed." };
+        }
+        return current;
+      });
+      if (["ai_item", "ai_complete", "error"].includes(payload.type)) void refreshHistory();
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
@@ -299,6 +407,106 @@ export default function App() {
     }
   }
 
+  async function saveAiSettings(patch: Partial<Pick<AiSettings, "enabled" | "model" | "maxWindows" | "consentAccepted">>) {
+    if (!ai) return;
+    setAiError(null);
+    setAiBusy(true);
+    try {
+      const next = await invoke<AiSettings>("save_ai_settings", {
+        request: {
+          enabled: patch.enabled ?? ai.enabled,
+          model: patch.model ?? ai.model,
+          maxWindows: patch.maxWindows ?? ai.maxWindows,
+          consentAccepted: patch.consentAccepted ?? ai.consentAccepted,
+        },
+      });
+      setAi(next);
+    } catch (reason) {
+      setAiError(friendlyError(reason));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function saveAiKey() {
+    const input = keyInputRef.current;
+    const value = input?.value.trim() ?? "";
+    if (!value) {
+      setAiError("Paste your Gemini API key first.");
+      return;
+    }
+    setAiBusy(true);
+    setAiError(null);
+    setAiConnection(null);
+    try {
+      const next = await invoke<AiSettings>("set_gemini_key", { key: value });
+      setAi(next);
+      if (input) input.value = "";
+      setAiConnection({
+        ok: true,
+        model: next.model,
+        message: "Key stored in Windows Credential Manager. Test the connection to confirm it.",
+        latencyMs: null,
+      });
+    } catch (reason) {
+      if (input) input.value = "";
+      setAiError(friendlyError(reason));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function clearAiKey() {
+    setAiBusy(true);
+    setAiError(null);
+    setAiConnection(null);
+    try {
+      setAi(await invoke<AiSettings>("clear_gemini_key"));
+    } catch (reason) {
+      setAiError(friendlyError(reason));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function testAiConnection() {
+    setAiBusy(true);
+    setAiError(null);
+    setAiConnection(null);
+    try {
+      const result = await invoke<AiConnectionResult>("test_ai_connection");
+      setAiConnection(result);
+      if (!result.ok) setAiError(result.message);
+    } catch (reason) {
+      setAiError(friendlyError(reason));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function startAiAnalysis() {
+    if (!aiTargetId) return;
+    setAiError(null);
+    setAiRun({ jobId: aiTargetId, status: "running", message: "Starting cloud analysis…", assessed: 0, total: 0 });
+    try {
+      await invoke("start_ai_analysis", { jobId: aiTargetId });
+    } catch (reason) {
+      const message = friendlyError(reason);
+      setAiError(message);
+      setAiRun({ jobId: aiTargetId, status: "failed", message, assessed: 0, total: 0 });
+    }
+  }
+
+  async function cancelAiAnalysis() {
+    if (!aiTargetId) return;
+    try {
+      await invoke("cancel_ai_analysis", { jobId: aiTargetId });
+      setAiRun((current) => ({ ...current, status: "cancelled", message: "Stopping cloud analysis…" }));
+    } catch (reason) {
+      setAiError(friendlyError(reason));
+    }
+  }
+
   function toggleSelection(key: string) {
     setSelectedKeys((current) =>
       current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
@@ -339,6 +547,16 @@ export default function App() {
   );
 
   const active = ["starting", "queued", "running", "cancelling"].includes(analysis.status);
+
+  const aiTargetId = historySelection?.id ?? analysis.id;
+  const aiTargetEntry = aiTargetId ? history.find((item) => item.id === aiTargetId) ?? null : null;
+  const aiRuntime = aiRun.jobId === aiTargetId ? aiRun : null;
+  const aiStatus = aiRuntime?.status ?? aiTargetEntry?.aiStatus ?? (ai?.enabled ? "ready" : "disabled");
+  const aiMessage = aiRuntime?.message ?? aiTargetEntry?.aiMessage ?? null;
+  const aiActive = aiStatus === "running";
+  const aiTargetComplete = (aiTargetEntry?.status ?? analysis.status) === "completed" && !!displayedCandidates.length;
+  const aiCanRun =
+    !!aiTargetId && aiTargetComplete && !!ai?.enabled && !!ai.hasKey && !!ai.consentAccepted && !aiActive;
 
   return (
     <main className="shell">
@@ -411,6 +629,120 @@ export default function App() {
         {analysis.status === "completed" && !historySelection && <p className="success-note"><i /> Done. Your clips are saved in Downloads/{media?.name.replace(/\.[^.]+$/, "") ?? "your video name"}.</p>}
       </section>
 
+      <section className="ai-section" aria-labelledby="ai-title">
+        <div className="section-heading">
+          <div className="section-title-wrap">
+            <span className="step-number">AI</span>
+            <div><p className="eyebrow">OPTIONAL CLOUD INTELLIGENCE</p><h2 id="ai-title">Cloud AI analysis</h2></div>
+          </div>
+          <span className={`ai-status status-${aiStatus}`}>{AI_STATUS_LABELS[aiStatus] ?? aiStatus}</span>
+        </div>
+        <p className="ai-privacy">{ai?.privacyNote ?? "Cloud analysis is optional. Luna's local analysis always works without it."}</p>
+
+        <div className="ai-grid">
+          <div className="ai-block">
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={!!ai?.enabled}
+                disabled={aiBusy || !ai}
+                onChange={(event) => void saveAiSettings({ enabled: event.target.checked })}
+              />
+              <span>
+                <strong>Send candidate segments to Gemini</strong>
+                <small>Off by default. Only the short windows Luna selects are uploaded.</small>
+              </span>
+            </label>
+
+            {ai?.enabled && !ai.consentAccepted && (
+              <div className="ai-consent">
+                <p>Before using cloud analysis, confirm you understand what leaves this device:</p>
+                <ul>
+                  <li>Only the 10–30 second segments around detected moments are uploaded, never the whole recording.</li>
+                  <li>Google processes them with the Gemini API; on the free tier submitted content may be used to improve Google’s products.</li>
+                  <li>Uploaded segments are deleted from Google after each request where the API allows it.</li>
+                </ul>
+                <button className="ghost-button" type="button" disabled={aiBusy} onClick={() => void saveAiSettings({ consentAccepted: true })}>
+                  I understand — enable cloud processing
+                </button>
+              </div>
+            )}
+            {ai?.consentAccepted && (
+              <p className="ai-hint">Cloud processing consent recorded. You can withdraw it by turning this off.</p>
+            )}
+
+            <div className="ai-field">
+              <label htmlFor="ai-model">Model</label>
+              <select
+                id="ai-model"
+                value={ai?.model ?? ""}
+                disabled={aiBusy || !ai}
+                onChange={(event) => void saveAiSettings({ model: event.target.value })}
+              >
+                {(ai?.supportedModels ?? []).map((model) => <option key={model} value={model}>{model}</option>)}
+              </select>
+            </div>
+
+            <div className="ai-field">
+              <label htmlFor="ai-windows">Windows per run · {ai?.maxWindows ?? 6}</label>
+              <input
+                id="ai-windows"
+                type="range" min={1} max={12} step={1}
+                value={ai?.maxWindows ?? 6}
+                disabled={aiBusy || !ai}
+                onChange={(event) => void saveAiSettings({ maxWindows: Number(event.target.value) })}
+              />
+              <small>Each window is one Gemini request. Higher values cost more of your quota.</small>
+            </div>
+          </div>
+
+          <div className="ai-block">
+            <div className="control-label">
+              <span>Your Gemini API key</span>
+              <span className={`status-chip ${ai?.hasKey ? "is-ready" : "is-empty"}`}>{ai?.hasKey ? "STORED SECURELY" : "NO KEY"}</span>
+            </div>
+            <p className="ai-hint">Where does the key go? Windows Credential Manager, read only by Luna’s native side. It is never written to the project, the database, logs or the page.</p>
+            <div className="ai-key-row">
+              <input
+                ref={keyInputRef}
+                type="password"
+                placeholder={ai?.hasKey ? "Replace the stored key" : "Paste your Gemini API key"}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={aiBusy}
+                aria-label="Gemini API key"
+              />
+              <button className="ghost-button" type="button" onClick={() => void saveAiKey()} disabled={aiBusy}>Save key</button>
+              <button className="text-button" type="button" onClick={() => void clearAiKey()} disabled={aiBusy || !ai?.hasKey}>Clear</button>
+            </div>
+            <div className="ai-actions">
+              <button className="ghost-button" type="button" onClick={() => void testAiConnection()} disabled={aiBusy || !ai?.hasKey}>
+                {aiBusy ? "Testing…" : "Test connection"}
+              </button>
+              <span className={`ai-hint ${aiConnection && !aiConnection.ok ? "is-bad" : ""}`}>
+                {aiConnection
+                  ? `${aiConnection.message}${aiConnection.latencyMs ? ` (${aiConnection.latencyMs} ms)` : ""}`
+                  : "Uses one model-metadata request. Nothing is uploaded."}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="ai-run">
+          <button className="ghost-button ai-run-button" type="button" onClick={() => void startAiAnalysis()} disabled={!aiCanRun || aiBusy}>
+            {aiActive ? "Reviewing with Gemini…" : "Review candidates with Gemini"}
+          </button>
+          {aiActive && <button className="text-button" type="button" onClick={() => void cancelAiAnalysis()}>Stop</button>}
+          <span className="ai-hint">
+            {aiMessage ?? (aiTargetComplete ? "Review the ranked moments with Gemini for semantic event labels." : "Finish a local analysis first.")}
+          </span>
+        </div>
+        {aiError && <p className="error-message" role="alert">{aiError}</p>}
+        {aiStatus === "rate_limited" && (
+          <p className="inline-warning">Gemini rate-limited this run. Your local results are unchanged — try again later rather than retrying immediately.</p>
+        )}
+      </section>
+
       <section className="results-section">
         <div className="section-heading">
           <div className="section-title-wrap"><span className="step-number">03</span><div><p className="eyebrow">YOUR CLIPS</p><h2>{historySelection ? historySelection.sourceName : "Highlights"}</h2></div></div>
@@ -440,14 +772,31 @@ export default function App() {
               return (
                 <article className={`candidate-row ${selected ? "is-selected" : ""}`} key={key}>
                   <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
-                  <div className="candidate-title"><strong>{candidate.title}</strong><span>{candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span></div>
+                  <div className="candidate-title">
+                    <strong>{candidate.aiTitle || candidate.title}</strong>
+                    <span>{candidate.aiTitle ? "GEMINI TITLE" : candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span>
+                  </div>
                   <div className="candidate-times">
                     <span><small>CLIP</small>{formatTimestamp(candidate.startMs)} – {formatTimestamp(candidate.endMs)}</span>
                     <span className="peak-time"><small>BEST MOMENT</small>{formatTimestamp(candidate.peakMs)}</span>
                   </div>
-                  <div className="candidate-score"><strong>{candidate.score}<small>/100</small></strong><span>HIGHLIGHT SCORE</span></div>
+                  <div className="candidate-score">
+                    <strong>{candidate.combinedScore ?? candidate.score}<small>/100</small></strong>
+                    <span>{candidate.combinedScore != null ? "RANKING SCORE" : "HIGHLIGHT SCORE"}</span>
+                  </div>
                   <p className="candidate-explanation">{candidate.explanation}</p>
-                  <div className="signal-list">{candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}</div>
+                  <div className="signal-list">
+                    {candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}
+                    {candidate.aiEventType && <span className="signal-ai">{candidate.aiEventType.replaceAll("_", " ")} · gemini</span>}
+                    {candidate.origin === "gemini" && <span className="signal-ai">found by gemini</span>}
+                  </div>
+                  {candidate.aiEventType && (
+                    <p className="ai-evidence">
+                      <strong>Gemini {candidate.aiScore != null ? `${candidate.aiScore}/100` : ""}</strong>
+                      {candidate.aiReason ? ` — ${candidate.aiReason}` : ""}
+                      {candidate.aiScore != null && ` · local evidence ${candidate.score}/100`}
+                    </p>
+                  )}
                   {candidate.clipPath && <p className="clip-saved"><i /> Saved · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
                   <div className="candidate-actions">
                     <button
