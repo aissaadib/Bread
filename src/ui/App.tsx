@@ -75,7 +75,7 @@ type ActiveAnalysis = {
 const idleAnalysis: ActiveAnalysis = {
   id: null,
   status: "idle",
-  stage: "Ready when you are",
+  stage: "Choose a video to get started",
   progress: 0,
   candidates: [],
   error: null,
@@ -83,32 +83,54 @@ const idleAnalysis: ActiveAnalysis = {
 };
 
 const stageNames: Record<string, string> = {
-  queued: "Waiting to start",
-  inspecting: "Checking recording",
-  analyzing_audio: "Analyzing audio",
-  analyzing_video: "Analyzing video",
-  transcribing: "Transcribing locally",
-  ranking: "Combining event signals",
-  rendering_clips: "Saving MP4 clips",
-  completed: "Analysis complete",
-  cancelling: "Stopping analysis",
-  cancelled: "Analysis cancelled",
-  failed: "Analysis failed",
+  queued: "Getting ready",
+  inspecting: "Checking your video",
+  analyzing_audio: "Listening for standout moments",
+  analyzing_video: "Looking for visual changes",
+  transcribing: "Checking speech locally",
+  ranking: "Choosing the strongest moments",
+  rendering_clips: "Saving your MP4 clips",
+  completed: "Your highlights are ready",
+  cancelling: "Stopping safely",
+  cancelled: "Analysis stopped",
+  failed: "Analysis needs attention",
 };
 
 function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds)) return "Unknown";
   const total = Math.floor(seconds);
-  return `${String(Math.floor(total / 3600)).padStart(2, "0")}:${String(Math.floor((total % 3600) / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  if (hours) return `${hours} hr ${minutes} min`;
+  if (minutes) return `${minutes} min ${remainder} sec`;
+  return `${remainder} sec`;
 }
 
 function formatTimestamp(milliseconds: number): string {
   const totalSeconds = Math.floor(milliseconds / 1000);
-  const millis = milliseconds % 1000;
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+  if (hours) return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatFrameRate(frameRate: string): string {
+  const cleaned = frameRate.trim().replace(/\s*fps$/i, "").trim();
+  if (!cleaned) return "";
+  if (cleaned.includes("/")) {
+    const [numerator, denominator] = cleaned.split("/").map(Number);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      const rate = Math.round((numerator / denominator) * 100) / 100;
+      return `${rate} fps`;
+    }
+  }
+  const rate = Number.parseFloat(cleaned);
+  if (Number.isFinite(rate) && rate > 0) {
+    return `${Math.round(rate * 100) / 100} fps`;
+  }
+  return `${cleaned} fps`;
 }
 
 function formatSize(bytes: number): string {
@@ -244,7 +266,7 @@ export default function App() {
     if (!media || busy) return;
     setError(null);
     setSelectedHistoryId(null);
-    setAnalysis({ ...idleAnalysis, status: "starting", stage: "Starting local worker" });
+    setAnalysis({ ...idleAnalysis, status: "starting", stage: "queued" });
     activeJobId.current = null;
     try {
       const id = await invoke<string>("start_analysis", { path: media.path });
@@ -278,91 +300,104 @@ export default function App() {
   return (
     <main className="shell">
       <header className="topbar">
-        <a className="brand" href="#home" aria-label="Luna home"><span className="brand-mark">L</span><span>LUNA</span></a>
-        <span className="local-badge"><i /> LOCAL WORKSPACE</span>
+        <a className="brand" href="#home" aria-label="Luna home"><span className="brand-mark">L</span><span className="brand-copy"><strong>LUNA</strong><small>STREAM CLIP FINDER</small></span></a>
+        <span className="local-badge"><i /> YOUR VIDEOS STAY ON THIS DEVICE</span>
       </header>
 
       <section className="intro">
-        <p className="eyebrow">STREAM ANALYZER <span>·</span> V0.1</p>
-        <h1>Find the moments<br />worth keeping.</h1>
-        <p className="lede">Analyze a recording on your computer and find the moments that stand out. Your original video stays where it is.</p>
+        <div className="intro-copy">
+          <p className="eyebrow">MADE FOR YOUR STREAM RECORDINGS</p>
+          <h1>Find the moments<br />worth sharing.</h1>
+          <p className="lede">Choose a recording and Luna will find standout moments, then save each one as a separate MP4 clip.</p>
+        </div>
+        <aside className="how-card" aria-label="How Luna works">
+          <p className="eyebrow">THREE SIMPLE STEPS</p>
+          <div className="how-step"><span>1</span><div><strong>Choose</strong><small>Pick a video from your computer</small></div></div>
+          <div className="how-step"><span>2</span><div><strong>Find</strong><small>Luna scans for standout moments</small></div></div>
+          <div className="how-step"><span>3</span><div><strong>Save</strong><small>Clips go into a folder in Downloads</small></div></div>
+        </aside>
       </section>
 
       <section className="source-panel" aria-labelledby="source-title">
         <div className="section-heading">
-          <div><p className="eyebrow">01 / SOURCE</p><h2 id="source-title">Choose a recording</h2></div>
-          <span className="format-note">MP4&nbsp; · &nbsp;MKV&nbsp; · &nbsp;WEBM</span>
+          <div className="section-title-wrap"><span className="step-number">01</span><div><p className="eyebrow">YOUR VIDEO</p><h2 id="source-title">Choose a recording</h2></div></div>
+          <span className="format-note">MP4 · MKV · WEBM</span>
         </div>
         {!media ? (
           <button className="dropzone" type="button" onClick={chooseMedia} disabled={busy || active}>
             <span className="upload-icon" aria-hidden="true">↑</span>
-            <span className="drop-title">{busy ? "Inspecting recording…" : "Select a video from this device"}</span>
-            <span className="drop-subtitle">Luna reads the file locally. It does not move or upload your recording.</span>
-            <span className="select-button">{busy ? "PLEASE WAIT" : "BROWSE FILES"}</span>
+            <span className="drop-title">{busy ? "Checking your video…" : "Choose a video to get started"}</span>
+            <span className="drop-subtitle">Select an MP4, MKV, or WebM recording from your computer.</span>
+            <span className="select-button">{busy ? "PLEASE WAIT" : "CHOOSE VIDEO"}<span aria-hidden="true">↗</span></span>
+            <span className="privacy-note"><i /> Your original video stays where it is. Luna works locally.</span>
           </button>
         ) : (
           <div className="media-summary">
-            <div className="file-icon">▤</div>
+            <div className="file-icon" aria-hidden="true">▶</div>
             <div className="file-details"><strong title={media.name}>{media.name}</strong><span>{formatDuration(media.durationSeconds)} · {formatSize(media.sizeBytes)}</span></div>
             <div className="media-specs">
-              <span>{media.width && media.height ? `${media.width} × ${media.height}` : "No video size"}</span>
-              <span>{media.frameRate ?? "Unknown frame rate"}</span>
-              <span className={media.audioTracks ? "audio-ok" : "audio-missing"}>{media.audioTracks ? `${media.audioTracks} audio track${media.audioTracks === 1 ? "" : "s"}` : "No audio track"}</span>
+              {media.width && media.height && <span>{media.width} × {media.height}</span>}
+              {media.frameRate && <span>{formatFrameRate(media.frameRate)}</span>}
+              <span className={media.audioTracks ? "audio-ok" : "audio-missing"}>{media.audioTracks ? `Audio included` : "No audio track"}</span>
             </div>
-            <button type="button" className="text-button" disabled={active} onClick={() => { setMedia(null); setError(null); }}>Change</button>
+            <button type="button" className="text-button change-button" disabled={active} onClick={() => { setMedia(null); setError(null); }}>Choose another</button>
           </div>
         )}
+        {media && !media.audioTracks && <p className="inline-note">This recording has no audio. Luna can still look for visual changes.</p>}
         {error && <p className="error-message" role="alert">{error}</p>}
       </section>
 
       <section className="analysis-panel" aria-labelledby="analysis-title">
         <div className="section-heading analysis-heading">
-          <div><p className="eyebrow">02 / ANALYSIS</p><h2 id="analysis-title">Local detection</h2></div>
-          {active && <span className="live-pill"><i /> IN PROGRESS</span>}
+          <div className="section-title-wrap"><span className="step-number">02</span><div><p className="eyebrow">FIND YOUR MOMENTS</p><h2 id="analysis-title">Ready to scan</h2></div></div>
+          {active && <span className="live-pill"><i /> WORKING</span>}
         </div>
-        <div className="engine-state">
+        <div className={`engine-state ${active ? "is-active" : ""} ${analysis.status === "failed" ? "has-error" : ""}`}>
           <span className={`state-dot ${analysis.status === "failed" ? "state-error" : ""}`} />
-          <div><strong>{stageNames[analysis.stage] ?? analysis.stage}</strong><span>Adaptive audio + low-rate visual analysis</span></div>
-          <span className="percent">{active ? `${analysis.progress}%` : "LOCAL"}</span>
+          <div><strong>{stageNames[analysis.stage] ?? analysis.stage}</strong><span>{media ? "Audio and video are checked on your device." : "Choose a video above before starting."}</span></div>
+          {active && <span className="percent">{analysis.progress}%</span>}
         </div>
-        <div className="progress-track" aria-label={`Analysis progress ${analysis.progress}%`}><span style={{ width: `${analysis.progress}%` }} /></div>
+        <div className={`progress-track ${active ? "progress-active" : ""}`} role="progressbar" aria-label="Analysis progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={analysis.progress}><span style={{ width: `${analysis.progress}%` }} /></div>
         <div className="analysis-actions">
           <button className="start-button" type="button" onClick={startAnalysis} disabled={!media || active || busy}>
-            {active ? "ANALYSIS RUNNING" : "START ANALYSIS"}<span>↗</span>
+            {active ? "Finding your moments…" : "Find my highlights"}<span aria-hidden="true">{active ? "···" : "↗"}</span>
           </button>
-          {active && analysis.id && <button className="cancel-button" type="button" onClick={cancelAnalysis}>Cancel</button>}
+          {active && analysis.id && <button className="cancel-button" type="button" onClick={cancelAnalysis}>Stop</button>}
         </div>
         {analysis.error && <p className="error-message" role="alert">{analysis.error}</p>}
+        {analysis.status === "completed" && !historySelection && <p className="success-note"><i /> Done. Your clips are saved in Downloads/{media?.name.replace(/\.[^.]+$/, "") ?? "your video name"}.</p>}
       </section>
 
       <section className="results-section">
         <div className="section-heading">
-          <div><p className="eyebrow">03 / RESULTS</p><h2>{historySelection ? historySelection.sourceName : "Detected moments"}</h2></div>
-          <span className="format-note">{displayedCandidates.length} FOUND</span>
+          <div className="section-title-wrap"><span className="step-number">03</span><div><p className="eyebrow">YOUR CLIPS</p><h2>{historySelection ? historySelection.sourceName : "Highlights"}</h2></div></div>
+          {!!displayedCandidates.length && <span className="result-count">{displayedCandidates.length} {displayedCandidates.length === 1 ? "clip" : "clips"}</span>}
         </div>
         {displayedCandidates.length ? (
+          <>
+          <p className="results-hint">Clips are saved as MP4 files in your Downloads folder. Higher scores mean stronger detected changes, not guaranteed highlights.</p>
           <div className="candidate-list">
             {displayedCandidates.map((candidate, index) => (
               <article className="candidate-row" key={`${candidate.peakMs}-${index}`}>
                 <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
                 <div className="candidate-title"><strong>{candidate.title}</strong><span>{candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span></div>
                 <div className="candidate-times">
-                  <span><small>START</small>{formatTimestamp(candidate.startMs)}</span>
-                  <span className="peak-time"><small>PEAK</small>{formatTimestamp(candidate.peakMs)}</span>
-                  <span><small>END</small>{formatTimestamp(candidate.endMs)}</span>
+                  <span><small>CLIP</small>{formatTimestamp(candidate.startMs)} – {formatTimestamp(candidate.endMs)}</span>
+                  <span className="peak-time"><small>BEST MOMENT</small>{formatTimestamp(candidate.peakMs)}</span>
                 </div>
-                <div className="candidate-score"><strong>{candidate.score}</strong><span>PRIORITY</span></div>
+                <div className="candidate-score"><strong>{candidate.score}<small>/100</small></strong><span>HIGHLIGHT SCORE</span></div>
                 <p className="candidate-explanation">{candidate.explanation}</p>
                 <div className="signal-list">{candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}</div>
-                {candidate.clipPath && <p className="clip-saved">MP4 SAVED · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
+                {candidate.clipPath && <p className="clip-saved"><i /> Saved · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
               </article>
             ))}
           </div>
+          </>
         ) : (
           <div className="empty-results">
-            <span className="empty-mark">—</span>
-            <p>{displayedStatus === "completed" ? "No moments met the current detection threshold." : "Run an analysis to see timestamped moments here."}</p>
-            <span>Scores rank detected evidence; they are not confidence probabilities.</span>
+            <span className="empty-mark" aria-hidden="true">✳</span>
+            <strong>{displayedStatus === "completed" ? "No standout moments found this time" : "Your highlights will show up here"}</strong>
+            <span>{displayedStatus === "completed" ? "Try another recording with clear audio or noticeable scene changes." : "Choose a recording, then select “Find my highlights”."}</span>
           </div>
         )}
         {!!displayedNotices.length && <ul className="notice-list">{displayedNotices.map((notice) => <li key={notice}>{notice}</li>)}</ul>}
@@ -370,26 +405,26 @@ export default function App() {
 
       <section className="history-section">
         <div className="section-heading">
-          <div><p className="eyebrow">04 / HISTORY</p><h2>Previous analyses</h2></div>
-          <span className="format-note">{history.length} SAVED</span>
+          <div><p className="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2>Recent recordings</h2></div>
+          {!!history.length && <span className="format-note">{history.length} SAVED</span>}
         </div>
-        {!history.length ? <p className="history-empty">Completed analyses are stored locally on this device.</p> : (
+        {!history.length ? <p className="history-empty">Your past analyses will appear here on this device.</p> : (
           <div className="history-list">
             {history.map((item) => (
               <button className={`history-item ${selectedHistoryId === item.id ? "selected" : ""}`} type="button" key={item.id}
                 disabled={active} onClick={() => { setSelectedHistoryId(item.id); setMedia(null); }}>
-                <span className={`history-status status-${item.status}`}>{item.status}</span>
+                <span className={`history-status status-${item.status}`}>{item.status === "completed" ? "Ready" : item.status === "failed" ? "Needs attention" : item.status}</span>
                 <span className="history-name">{item.sourceName}</span>
                 <span className="history-detail">{item.candidates.length} moments · {new Date(item.createdAt).toLocaleDateString()}</span>
                 <span className="history-arrow">↗</span>
               </button>
             ))}
-            {selectedHistoryId && <button type="button" className="text-button clear-history" onClick={() => { setSelectedHistoryId(null); void refreshHistory(); }}>Close history</button>}
+            {selectedHistoryId && <button type="button" className="text-button clear-history" onClick={() => { setSelectedHistoryId(null); void refreshHistory(); }}>Back to current recording</button>}
           </div>
         )}
       </section>
 
-      <footer><span>LOCAL FIRST BY DESIGN</span><span>V0.1 · ANALYSIS FOUNDATION</span></footer>
+      <footer><span><i /> YOUR FILES STAY ON YOUR DEVICE</span><span>LUNA · STREAM CLIP FINDER</span></footer>
     </main>
   );
 }
