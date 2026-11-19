@@ -52,11 +52,36 @@ def inspect_media(path: str) -> dict[str, Any]:
         duration = 0.0
     if not duration or duration < 0:
         raise MediaError("duration_missing", "This recording has no readable duration.")
+
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    rotation = _rotation(video)
+    display_width, display_height = width, height
+    if abs(rotation) % 180 == 90:
+        display_width, display_height = height, width
     return {
         "duration_seconds": duration,
         "has_audio": bool(audio),
         "has_video": True,
         "audio_tracks": len(audio),
-        "video_codec": (video or {}).get("codec_name"),
+        "video_codec": video.get("codec_name"),
         "audio_codec": audio[0].get("codec_name") if audio else None,
+        "width": width,
+        "height": height,
+        "display_width": display_width,
+        "display_height": display_height,
+        "rotation": rotation,
     }
+
+
+def _rotation(video: dict[str, Any]) -> int:
+    try:
+        for side_data in video.get("side_data_list", []) or []:
+            if "rotation" in side_data:
+                return int(round(float(side_data["rotation"])))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(round(float(video.get("tags", {}).get("rotate", 0))))
+    except (TypeError, ValueError):
+        return 0

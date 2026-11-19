@@ -1,3 +1,4 @@
+mod exports;
 mod logic;
 mod storage;
 
@@ -21,9 +22,11 @@ const MAX_WORKER_MESSAGE_BYTES: usize = 1_048_576;
 const MAX_WORKER_RUNTIME: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_ANALYSIS_CONFIG: &str = include_str!("../../worker/config.json");
 
-struct AppState {
-    database: Mutex<Database>,
-    workers: Mutex<HashMap<String, ChildStdin>>,
+pub(crate) struct AppState {
+    pub(crate) database: Mutex<Database>,
+    pub(crate) workers: Mutex<HashMap<String, ChildStdin>>,
+    pub(crate) export: Mutex<Option<exports::ActiveExport>>,
+    pub(crate) data_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -35,17 +38,30 @@ struct MediaInfo {
     size_bytes: u64,
     width: Option<u64>,
     height: Option<u64>,
+    display_width: Option<u64>,
+    display_height: Option<u64>,
+    rotation: i64,
     frame_rate: Option<String>,
     video_codec: Option<String>,
     audio_codec: Option<String>,
     audio_tracks: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptionData {
+    available: bool,
+    has_transcript: bool,
+    segments: Vec<Value>,
+}
+
 #[tauri::command]
-async fn register_media(state: State<'_, Arc<AppState>>, path: String) -> Result<MediaInfo, String> {
+async fn register_media(app: AppHandle, state: State<'_, Arc<AppState>>, path: String) -> Result<MediaInfo, String> {
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let media = inspect_media(&path)?;
+        app.asset_protocol_scope().allow_file(&media.path)
+            .map_err(|error| format!("The preview could not access this recording: {error}"))?;
         state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
             .register_source(&media)?;
         Ok(media)
@@ -55,6 +71,56 @@ async fn register_media(state: State<'_, Arc<AppState>>, path: String) -> Result
 #[tauri::command]
 fn list_history(state: State<'_, Arc<AppState>>) -> Result<Vec<HistoryEntry>, String> {
     state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?.history()
+}
+
+#[tauri::command]
+fn get_caption_data(state: State<'_, Arc<AppState>>, job_id: String, start_ms: u64, end_ms: u64)
+    -> Result<CaptionData, String> {
+    let segments = state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
+        .transcript(&job_id)?;
+    let has_transcript = !segments.is_empty();
+    let start_seconds = start_ms as f64 / 1000.0;
+    let end_seconds = end_ms as f64 / 1000.0;
+    let filtered = segments.into_iter().filter(|segment| {
+        let segment_start = segment.get("start_seconds").and_then(Value::as_f64).unwrap_or(0.0);
+        let segment_end = segment.get("end_seconds").and_then(Value::as_f64).unwrap_or(segment_start);
+        segment_end >= start_seconds - 2.0 && segment_start <= end_seconds + 1.0
+    }).collect::<Vec<_>>();
+    Ok(CaptionData { available: !filtered.is_empty(), has_transcript, segments: filtered })
+}
+
+#[tauri::command]
+fn start_short_export(app: AppHandle, state: State<'_, Arc<AppState>>, request: exports::ExportRequest)
+    -> Result<exports::StartExportResult, String> {
+    exports::start(&app, state.inner(), request)
+}
+
+#[tauri::command]
+fn retry_short_export(app: AppHandle, state: State<'_, Arc<AppState>>, export_id: String)
+    -> Result<exports::StartExportResult, String> {
+    exports::retry(&app, state.inner(), &export_id)
+}
+
+#[tauri::command]
+fn cancel_short_export(state: State<'_, Arc<AppState>>, batch_id: String) -> Result<(), String> {
+    exports::cancel(state.inner(), &batch_id)
+}
+
+#[tauri::command]
+fn list_exports(state: State<'_, Arc<AppState>>, job_id: Option<String>, limit: Option<u32>)
+    -> Result<Vec<storage::ExportRecord>, String> {
+    state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
+        .list_exports(job_id.as_deref(), limit.unwrap_or(30))
+}
+
+#[tauri::command]
+fn open_short_export(state: State<'_, Arc<AppState>>, export_id: String) -> Result<(), String> {
+    exports::open_export(state.inner(), &export_id, false)
+}
+
+#[tauri::command]
+fn reveal_short_export(state: State<'_, Arc<AppState>>, export_id: String) -> Result<(), String> {
+    exports::open_export(state.inner(), &export_id, true)
 }
 
 #[tauri::command]
@@ -132,9 +198,7 @@ fn inspect_media(path: &str) -> Result<MediaInfo, String> {
     let canonical = file.canonicalize().map_err(|_| "This recording cannot be opened.".to_string())?;
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error", "-show_entries",
-            "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate",
-            "-of", "json",
+            "-v", "error", "-show_streams", "-show_format", "-of", "json",
         ])
         .arg(&canonical)
         .stdin(Stdio::null())
@@ -160,14 +224,30 @@ fn inspect_media(path: &str) -> Result<MediaInfo, String> {
     let video = video.ok_or_else(|| "This file does not contain a readable video track.".to_string())?;
     let name = canonical.file_name().and_then(|value| value.to_str()).unwrap_or("Recording").to_string();
     let size_bytes = fs::metadata(&canonical).map_err(|_| "Could not read recording details.".to_string())?.len();
+    let width = video.get("width").and_then(Value::as_u64);
+    let height = video.get("height").and_then(Value::as_u64);
+    let rotation = video.get("side_data_list").and_then(Value::as_array)
+        .and_then(|items| items.iter().find_map(|item| item.get("rotation").and_then(Value::as_f64)))
+        .or_else(|| video.get("tags").and_then(|tags| tags.get("rotate")).and_then(Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok()))
+        .map(|value| value.round() as i64)
+        .unwrap_or(0);
+    let (display_width, display_height) = if rotation.abs() % 180 == 90 {
+        (height, width)
+    } else {
+        (width, height)
+    };
 
     Ok(MediaInfo {
         path: canonical.to_string_lossy().to_string(),
         name,
         duration_seconds,
         size_bytes,
-        width: video.get("width").and_then(Value::as_u64),
-        height: video.get("height").and_then(Value::as_u64),
+        width,
+        height,
+        display_width,
+        display_height,
+        rotation,
         frame_rate: video.get("avg_frame_rate").and_then(Value::as_str).map(normalize_rate),
         video_codec: video.get("codec_name").and_then(Value::as_str).map(str::to_string),
         audio_codec: audio_streams.first().and_then(|stream| stream.get("codec_name")).and_then(Value::as_str).map(str::to_string),
@@ -189,7 +269,7 @@ fn validate_file(path: &Path) -> Result<(), String> {
 
 pub use logic::{normalize_rate, supported_extension};
 
-fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
         let development_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/clipper_worker.py");
         if development_path.is_file() {
@@ -200,9 +280,17 @@ fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("The bundled Python worker could not be located: {error}"))
 }
 
-fn clip_output_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String> {
-    let downloads = app.path().download_dir()
-        .map_err(|error| format!("Could not find the Downloads folder: {error}"))?;
+pub(crate) fn resolve_export_worker(app: &AppHandle) -> Result<PathBuf, String> {
+    let worker = resolve_worker(app)?;
+    let export_worker = worker.with_file_name("export_worker.py");
+    if export_worker.is_file() {
+        Ok(export_worker)
+    } else {
+        Err("The bundled short-form export worker could not be located.".into())
+    }
+}
+
+fn safe_folder_name(media_path: &str) -> String {
     let stem = Path::new(media_path).file_stem().and_then(|name| name.to_str()).unwrap_or("Luna clips");
     let safe_name: String = stem.chars()
         .map(|character| if character.is_control() || "<>:\"/\\|?*".contains(character) { '_' } else { character })
@@ -210,17 +298,36 @@ fn clip_output_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String>
     let safe_name = safe_name.trim_matches([' ', '.']);
     let safe_name = if safe_name.is_empty() { "Luna clips" } else { safe_name };
     let reserved = safe_name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let safe_name = if matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9") {
+    if matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9") {
         format!("_{safe_name}")
     } else {
         safe_name.to_string()
-    };
-    let folder = downloads.join(safe_name);
+    }
+}
+
+fn clip_output_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String> {
+    let downloads = app.path().download_dir()
+        .map_err(|error| format!("Could not find the Downloads folder: {error}"))?;
+    let folder = downloads.join(safe_folder_name(media_path));
     fs::create_dir_all(&folder).map_err(|error| format!("Could not create the clip folder in Downloads: {error}"))?;
     Ok(folder)
 }
 
-fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
+fn short_export_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String> {
+    let downloads = app.path().download_dir()
+        .map_err(|error| format!("Could not find the Downloads folder: {error}"))?;
+    let folder = downloads.join("Luna Shorts").join(safe_folder_name(media_path));
+    fs::create_dir_all(&folder)
+        .map_err(|error| format!("Could not create the short-form export folder: {error}"))?;
+    Ok(folder)
+}
+
+#[tauri::command]
+fn default_export_dir(app: AppHandle, source_path: String) -> Result<String, String> {
+    short_export_dir(&app, &source_path).map(|folder| folder.to_string_lossy().to_string())
+}
+
+pub(crate) fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
     let explicit = std::env::var_os("LUNA_PYTHON");
     let mut candidates: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
     if let Some(path) = explicit {
@@ -400,10 +507,19 @@ pub fn run() {
             fs::create_dir_all(&data_dir)?;
             let data_path = data_dir.join("luna.sqlite3");
             let database = Database::open(&data_path).map_err(std::io::Error::other)?;
-            app.manage(Arc::new(AppState { database: Mutex::new(database), workers: Mutex::new(HashMap::new()) }));
+            app.manage(Arc::new(AppState {
+                database: Mutex::new(database),
+                workers: Mutex::new(HashMap::new()),
+                export: Mutex::new(None),
+                data_dir,
+            }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![register_media, list_history, start_analysis, cancel_analysis])
+        .invoke_handler(tauri::generate_handler![
+            register_media, list_history, start_analysis, cancel_analysis,
+            get_caption_data, default_export_dir, start_short_export, retry_short_export,
+            cancel_short_export, list_exports, open_short_export, reveal_short_export,
+        ])
         .run(tauri::generate_context!())
         .expect("Luna desktop runtime failed");
 }

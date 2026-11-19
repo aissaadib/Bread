@@ -7,6 +7,7 @@ use crate::MediaInfo;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 const CLIP_EXPORT_SCHEMA: &str = include_str!("../migrations/002_clip_exports.sql");
+const SHORTFORM_EXPORT_SCHEMA: &str = include_str!("../migrations/003_shortform_exports.sql");
 
 pub(crate) struct Database {
     connection: Connection,
@@ -30,6 +31,7 @@ pub struct HistoryEntry {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryCandidate {
+    pub id: i64,
     pub start_ms: u64,
     pub peak_ms: u64,
     pub end_ms: u64,
@@ -39,6 +41,59 @@ pub struct HistoryCandidate {
     pub title: String,
     pub title_source: String,
     pub clip_path: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRecord {
+    pub id: String,
+    pub batch_id: String,
+    pub job_id: String,
+    pub candidate_id: Option<i64>,
+    pub source_path: String,
+    pub title: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub peak_ms: u64,
+    pub aspect: String,
+    pub mode: String,
+    pub crop_x: f64,
+    pub crop_y: f64,
+    pub captions: bool,
+    pub crf: u8,
+    pub output_path: Option<String>,
+    pub status: String,
+    pub stage: String,
+    pub progress: u8,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone)]
+pub struct NewExportRow {
+    pub id: String,
+    pub candidate_id: Option<i64>,
+    pub title: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub peak_ms: u64,
+}
+
+pub struct JobSource {
+    pub path: String,
+    pub name: String,
+    pub duration_ms: i64,
+    pub transcript: Vec<Value>,
+    pub status: String,
+}
+
+pub struct CandidateRecord {
+    pub id: i64,
+    pub start_ms: u64,
+    pub peak_ms: u64,
+    pub end_ms: u64,
+    pub title: String,
 }
 
 impl Database {
@@ -59,7 +114,11 @@ impl Database {
             connection.execute_batch(CLIP_EXPORT_SCHEMA).map_err(db_error)?;
             version = 2;
         }
-        if version > 2 {
+        if version == 2 {
+            connection.execute_batch(SHORTFORM_EXPORT_SCHEMA).map_err(db_error)?;
+            version = 3;
+        }
+        if version > 3 {
             return Err(format!("Database version {version} is newer than this Luna build."));
         }
         connection.execute(
@@ -162,9 +221,10 @@ impl Database {
             }
             "complete" => {
                 let notices = event.get("notices").cloned().unwrap_or(Value::Array(Vec::new())).to_string();
+                let transcript = event.get("transcript").cloned().unwrap_or(Value::Array(Vec::new())).to_string();
                 self.connection.execute(
-                    "UPDATE jobs SET status='completed',stage='completed',progress=100,notices_json=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
-                    params![id, notices],
+                    "UPDATE jobs SET status='completed',stage='completed',progress=100,notices_json=?2,transcript_json=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                    params![id, notices, transcript],
                 ).map_err(db_error)?;
             }
             "cancelled" => {
@@ -209,22 +269,252 @@ impl Database {
 
     fn candidates(&self, job_id: &str) -> Result<Vec<HistoryCandidate>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT start_ms,peak_ms,end_ms,score,signals_json,explanation,title,title_source,clip_path FROM candidates WHERE job_id=?1 ORDER BY start_ms",
+            "SELECT id,start_ms,peak_ms,end_ms,score,signals_json,explanation,title,title_source,clip_path FROM candidates WHERE job_id=?1 ORDER BY start_ms",
         ).map_err(db_error)?;
         let rows = statement.query_map([job_id], |row| {
-            let raw_signals: String = row.get(4)?;
+            let raw_signals: String = row.get(5)?;
             let signals = serde_json::from_str(&raw_signals).unwrap_or_default();
             Ok(HistoryCandidate {
-                start_ms: row.get::<_, i64>(0)?.max(0) as u64,
-                peak_ms: row.get::<_, i64>(1)?.max(0) as u64,
-                end_ms: row.get::<_, i64>(2)?.max(0) as u64,
-                score: row.get::<_, i64>(3)?.clamp(0, 100) as u8,
-                signals, explanation: row.get(5)?, title: row.get(6)?,
-                title_source: row.get(7)?, clip_path: row.get(8)?,
+                id: row.get(0)?,
+                start_ms: row.get::<_, i64>(1)?.max(0) as u64,
+                peak_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                end_ms: row.get::<_, i64>(3)?.max(0) as u64,
+                score: row.get::<_, i64>(4)?.clamp(0, 100) as u8,
+                signals, explanation: row.get(6)?, title: row.get(7)?,
+                title_source: row.get(8)?, clip_path: row.get(9)?,
             })
         }).map_err(db_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
     }
+
+    pub(crate) fn job_source(&self, job_id: &str) -> Result<Option<JobSource>, String> {
+        self.connection.query_row(
+            "SELECT s.path,s.name,s.duration_ms,j.transcript_json,j.status
+             FROM jobs j JOIN sources s ON s.id=j.source_id WHERE j.id=?1",
+            [job_id],
+            |row| {
+                let transcript_json: String = row.get(3)?;
+                let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
+                Ok(JobSource {
+                    path: row.get(0)?, name: row.get(1)?,
+                    duration_ms: row.get(2)?, transcript, status: row.get(4)?,
+                })
+            },
+        ).optional().map_err(db_error)
+    }
+
+    pub(crate) fn transcript(&self, job_id: &str) -> Result<Vec<Value>, String> {
+        let raw: Option<String> = self.connection.query_row(
+            "SELECT transcript_json FROM jobs WHERE id=?1", [job_id], |row| row.get(0),
+        ).optional().map_err(db_error)?;
+        Ok(raw.and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default())
+    }
+
+    pub(crate) fn candidate_for_export(&self, job_id: &str, candidate_id: Option<i64>,
+                                       peak_ms: u64) -> Result<Option<CandidateRecord>, String> {
+        if let Some(id) = candidate_id {
+            let found = self.connection.query_row(
+                "SELECT id,start_ms,peak_ms,end_ms,title FROM candidates WHERE id=?1 AND job_id=?2",
+                params![id, job_id],
+                |row| Ok(CandidateRecord {
+                    id: row.get(0)?,
+                    start_ms: row.get::<_, i64>(1)?.max(0) as u64,
+                    peak_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                    end_ms: row.get::<_, i64>(3)?.max(0) as u64,
+                    title: row.get(4)?,
+                }),
+            ).optional().map_err(db_error)?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        self.connection.query_row(
+            "SELECT id,start_ms,peak_ms,end_ms,title FROM candidates WHERE job_id=?1 AND peak_ms=?2 ORDER BY id LIMIT 1",
+            params![job_id, peak_ms as i64],
+            |row| Ok(CandidateRecord {
+                id: row.get(0)?,
+                start_ms: row.get::<_, i64>(1)?.max(0) as u64,
+                peak_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                end_ms: row.get::<_, i64>(3)?.max(0) as u64,
+                title: row.get(4)?,
+            }),
+        ).optional().map_err(db_error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_exports(&mut self, batch_id: &str, job_id: &str, source_path: &str,
+                                 aspect: &str, mode: &str, crop_x: f64, crop_y: f64,
+                                 captions: bool, crf: u8, rows: &[NewExportRow]) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(db_error)?;
+        for row in rows {
+            transaction.execute(
+                "INSERT INTO clip_exports(id,batch_id,job_id,candidate_id,source_path,title,start_ms,end_ms,peak_ms,\
+                 aspect,mode,crop_x,crop_y,captions,crf,status,stage) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'queued','waiting')",
+                params![row.id, batch_id, job_id, row.candidate_id, source_path, row.title,
+                        row.start_ms as i64, row.end_ms as i64, row.peak_ms as i64,
+                        aspect, mode, crop_x, crop_y, if captions { 1 } else { 0 }, crf as i64],
+            ).map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
+    }
+
+    pub(crate) fn exports_for_batch(&self, batch_id: &str) -> Result<Vec<ExportRecord>, String> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,batch_id,job_id,candidate_id,source_path,title,start_ms,end_ms,peak_ms,\
+             aspect,mode,crop_x,crop_y,captions,crf,output_path,status,stage,progress,error_message,\
+             created_at,updated_at FROM clip_exports WHERE batch_id=?1 ORDER BY created_at,rowid",
+        ).map_err(db_error)?;
+        let rows = statement.query_map([batch_id], export_from_row).map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+    }
+
+    pub(crate) fn list_exports(&self, job_id: Option<&str>, limit: u32) -> Result<Vec<ExportRecord>, String> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,batch_id,job_id,candidate_id,source_path,title,start_ms,end_ms,peak_ms,\
+             aspect,mode,crop_x,crop_y,captions,crf,output_path,status,stage,progress,error_message,\
+             created_at,updated_at FROM clip_exports \
+             WHERE (?1 IS NULL OR job_id=?1) ORDER BY created_at DESC,rowid DESC LIMIT ?2",
+        ).map_err(db_error)?;
+        let rows = statement.query_map(params![job_id, limit.clamp(1, 200) as i64], export_from_row)
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+    }
+
+    pub(crate) fn export_record(&self, id: &str) -> Result<Option<ExportRecord>, String> {
+        self.connection.query_row(
+            "SELECT id,batch_id,job_id,candidate_id,source_path,title,start_ms,end_ms,peak_ms,\
+             aspect,mode,crop_x,crop_y,captions,crf,output_path,status,stage,progress,error_message,\
+             created_at,updated_at FROM clip_exports WHERE id=?1",
+            [id], export_from_row,
+        ).optional().map_err(db_error)
+    }
+
+    pub(crate) fn update_export_started(&mut self, id: &str, output_path: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET output_path=?2,status='preparing',stage='preparing',progress=0,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![id, output_path],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn update_export_progress(&mut self, id: &str, progress: u8) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='rendering',stage='rendering',progress=?2,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status NOT IN ('completed','failed','cancelled')",
+            params![id, progress.clamp(0, 100) as i64],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn update_export_stage(&mut self, id: &str, stage: &str) -> Result<(), String> {
+        let status = match stage {
+            "finalizing" => "finalizing",
+            "preparing" => "preparing",
+            _ => "rendering",
+        };
+        self.connection.execute(
+            "UPDATE clip_exports SET status=?2,stage=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+             WHERE id=?1 AND status NOT IN ('completed','failed','cancelled')",
+            params![id, status, stage],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn complete_export(&mut self, id: &str, output_path: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET output_path=?2,status='completed',stage='completed',progress=100,\
+             error_message=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![id, output_path],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn fail_export(&mut self, id: &str, message: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='failed',stage='failed',error_message=?2,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![id, message],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn cancel_export_row(&mut self, id: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='cancelled',stage='cancelled',\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 \
+             AND status NOT IN ('completed','failed')",
+            [id],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn cancel_remaining_exports(&mut self, batch_id: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='cancelled',stage='cancelled',\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE batch_id=?1 \
+             AND status NOT IN ('completed','failed','cancelled')",
+            [batch_id],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn fail_remaining_exports(&mut self, batch_id: &str, message: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='failed',stage='failed',error_message=?2,\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE batch_id=?1 \
+             AND status NOT IN ('completed','failed','cancelled')",
+            params![batch_id, message],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_batch_cancelling(&mut self, batch_id: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET status='cancelling',stage='cancelling',\
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE batch_id=?1 \
+             AND status NOT IN ('completed','failed','cancelled')",
+            [batch_id],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn reset_export_for_retry(&mut self, id: &str, batch_id: &str) -> Result<(), String> {
+        self.connection.execute(
+            "UPDATE clip_exports SET batch_id=?2,status='queued',stage='waiting',progress=0,\
+             output_path=NULL,error_message=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![id, batch_id],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+}
+
+fn export_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExportRecord> {
+    Ok(ExportRecord {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        job_id: row.get(2)?,
+        candidate_id: row.get(3)?,
+        source_path: row.get(4)?,
+        title: row.get(5)?,
+        start_ms: row.get::<_, i64>(6)?.max(0) as u64,
+        end_ms: row.get::<_, i64>(7)?.max(0) as u64,
+        peak_ms: row.get::<_, i64>(8)?.max(0) as u64,
+        aspect: row.get(9)?,
+        mode: row.get(10)?,
+        crop_x: row.get(11)?,
+        crop_y: row.get(12)?,
+        captions: row.get::<_, i64>(13)? != 0,
+        crf: row.get::<_, i64>(14)?.clamp(0, 100) as u8,
+        output_path: row.get(15)?,
+        status: row.get(16)?,
+        stage: row.get(17)?,
+        progress: row.get::<_, i64>(18)?.clamp(0, 100) as u8,
+        error_message: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+    })
 }
 
 fn db_error(error: rusqlite::Error) -> String {

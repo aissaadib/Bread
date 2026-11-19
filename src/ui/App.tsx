@@ -2,44 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-
-type MediaInfo = {
-  path: string;
-  name: string;
-  durationSeconds: number;
-  sizeBytes: number;
-  width: number | null;
-  height: number | null;
-  frameRate: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  audioTracks: number;
-};
-
-type Candidate = {
-  startMs: number;
-  peakMs: number;
-  endMs: number;
-  score: number;
-  signals: string[];
-  explanation: string;
-  title: string;
-  titleSource: string;
-  clipPath: string | null;
-};
-
-type HistoryEntry = {
-  id: string;
-  sourceName: string;
-  path: string;
-  status: string;
-  stage: string;
-  progress: number;
-  createdAt: string;
-  errorMessage: string | null;
-  notices: string[];
-  candidates: Candidate[];
-};
+import Studio from "./Studio";
+import type { Candidate, HistoryEntry, MediaInfo, StudioClip } from "./types";
 
 type AnalysisEvent = {
   job_id: string;
@@ -70,6 +34,14 @@ type ActiveAnalysis = {
   candidates: Candidate[];
   error: string | null;
   notices: string[];
+};
+
+type StudioSession = {
+  jobId: string;
+  path: string;
+  media: MediaInfo;
+  clips: StudioClip[];
+  initialPositionMs: number;
 };
 
 const idleAnalysis: ActiveAnalysis = {
@@ -148,6 +120,23 @@ function friendlyError(reason: unknown): string {
   return typeof reason === "string" ? reason : "Something went wrong. Please try again.";
 }
 
+function candidateKey(candidate: Candidate, index: number): string {
+  return `${candidate.peakMs}-${index}`;
+}
+
+function toStudioClip(candidate: Candidate, index: number): StudioClip {
+  return {
+    key: candidateKey(candidate, index),
+    candidateId: candidate.id ?? null,
+    title: candidate.title,
+    peakMs: candidate.peakMs,
+    startMs: candidate.startMs,
+    endMs: candidate.endMs,
+    detectedStartMs: candidate.startMs,
+    detectedEndMs: candidate.endMs,
+  };
+}
+
 function applyEvent(current: ActiveAnalysis, event: AnalysisEvent): ActiveAnalysis {
   switch (event.type) {
     case "stage":
@@ -194,8 +183,12 @@ export default function App() {
   const [analysis, setAnalysis] = useState<ActiveAnalysis>(idleAnalysis);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [studio, setStudio] = useState<StudioSession | null>(null);
+  const [studioBusy, setStudioBusy] = useState(false);
   const bufferedEvents = useRef(new Map<string, AnalysisEvent[]>());
   const activeJobId = useRef<string | null>(null);
+  const studioRef = useRef<HTMLDivElement | null>(null);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -232,6 +225,19 @@ export default function App() {
     };
   }, [refreshHistory]);
 
+  const historySelection = history.find((item) => item.id === selectedHistoryId) ?? null;
+  const displayedCandidates = historySelection?.candidates ?? analysis.candidates;
+  const displayedStatus = historySelection?.status ?? analysis.status;
+  const displayedNotices = historySelection?.notices ?? analysis.notices;
+
+  useEffect(() => {
+    setSelectedKeys([]);
+  }, [selectedHistoryId, analysis.id]);
+
+  useEffect(() => {
+    if (studio) studioRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [studio]);
+
   async function chooseMedia() {
     setError(null);
     let selection: string | string[] | null;
@@ -251,6 +257,7 @@ export default function App() {
     setMedia(null);
     setAnalysis(idleAnalysis);
     setSelectedHistoryId(null);
+    setStudio(null);
     try {
       const inspected = await invoke<MediaInfo>("register_media", { path: selection });
       setMedia(inspected);
@@ -266,6 +273,7 @@ export default function App() {
     if (!media || busy) return;
     setError(null);
     setSelectedHistoryId(null);
+    setStudio(null);
     setAnalysis({ ...idleAnalysis, status: "starting", stage: "queued" });
     activeJobId.current = null;
     try {
@@ -291,11 +299,46 @@ export default function App() {
     }
   }
 
+  function toggleSelection(key: string) {
+    setSelectedKeys((current) =>
+      current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
+    );
+  }
+
+  async function openStudio(candidates: Candidate[], initialPositionMs?: number) {
+    if (!candidates.length) return;
+    const jobId = historySelection?.id ?? analysis.id;
+    const path = historySelection?.path ?? media?.path ?? null;
+    if (!jobId || !path) {
+      setError("Finish an analysis before opening the short-form studio.");
+      return;
+    }
+    setError(null);
+    setStudioBusy(true);
+    try {
+      const inspected =
+        media && media.path === path ? media : await invoke<MediaInfo>("register_media", { path });
+      setSelectedHistoryId(null);
+      setMedia(inspected);
+      setStudio({
+        jobId,
+        path,
+        media: inspected,
+        clips: candidates.map(toStudioClip),
+        initialPositionMs: initialPositionMs ?? candidates[0].peakMs,
+      });
+    } catch (reason) {
+      setError(friendlyError(reason));
+    } finally {
+      setStudioBusy(false);
+    }
+  }
+
+  const selectedCandidates = displayedCandidates.filter((candidate, index) =>
+    selectedKeys.includes(candidateKey(candidate, index)),
+  );
+
   const active = ["starting", "queued", "running", "cancelling"].includes(analysis.status);
-  const historySelection = history.find((item) => item.id === selectedHistoryId) ?? null;
-  const displayedCandidates = historySelection?.candidates ?? analysis.candidates;
-  const displayedStatus = historySelection?.status ?? analysis.status;
-  const displayedNotices = historySelection?.notices ?? analysis.notices;
 
   return (
     <main className="shell">
@@ -308,13 +351,13 @@ export default function App() {
         <div className="intro-copy">
           <p className="eyebrow">MADE FOR YOUR STREAM RECORDINGS</p>
           <h1>Find the moments<br />worth sharing.</h1>
-          <p className="lede">Choose a recording and Luna will find standout moments, then save each one as a separate MP4 clip.</p>
+          <p className="lede">Choose a recording and Luna will find standout moments, then shape any one of them into a vertical short.</p>
         </div>
         <aside className="how-card" aria-label="How Luna works">
           <p className="eyebrow">THREE SIMPLE STEPS</p>
           <div className="how-step"><span>1</span><div><strong>Choose</strong><small>Pick a video from your computer</small></div></div>
           <div className="how-step"><span>2</span><div><strong>Find</strong><small>Luna scans for standout moments</small></div></div>
-          <div className="how-step"><span>3</span><div><strong>Save</strong><small>Clips go into a folder in Downloads</small></div></div>
+          <div className="how-step"><span>3</span><div><strong>Shape</strong><small>Frame and export a short-form MP4</small></div></div>
         </aside>
       </section>
 
@@ -340,7 +383,7 @@ export default function App() {
               {media.frameRate && <span>{formatFrameRate(media.frameRate)}</span>}
               <span className={media.audioTracks ? "audio-ok" : "audio-missing"}>{media.audioTracks ? `Audio included` : "No audio track"}</span>
             </div>
-            <button type="button" className="text-button change-button" disabled={active} onClick={() => { setMedia(null); setError(null); }}>Choose another</button>
+            <button type="button" className="text-button change-button" disabled={active} onClick={() => { setMedia(null); setStudio(null); setError(null); }}>Choose another</button>
           </div>
         )}
         {media && !media.audioTracks && <p className="inline-note">This recording has no audio. Luna can still look for visual changes.</p>}
@@ -371,26 +414,63 @@ export default function App() {
       <section className="results-section">
         <div className="section-heading">
           <div className="section-title-wrap"><span className="step-number">03</span><div><p className="eyebrow">YOUR CLIPS</p><h2>{historySelection ? historySelection.sourceName : "Highlights"}</h2></div></div>
-          {!!displayedCandidates.length && <span className="result-count">{displayedCandidates.length} {displayedCandidates.length === 1 ? "clip" : "clips"}</span>}
+          {!!displayedCandidates.length && (
+            <div className="results-actions">
+              {!!selectedCandidates.length && (
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={studioBusy || active}
+                  onClick={() => void openStudio(selectedCandidates, selectedCandidates[0].peakMs)}
+                >
+                  Shape {selectedCandidates.length} {selectedCandidates.length === 1 ? "short" : "shorts"}
+                </button>
+              )}
+              <span className="result-count">{displayedCandidates.length} {displayedCandidates.length === 1 ? "clip" : "clips"}</span>
+            </div>
+          )}
         </div>
         {displayedCandidates.length ? (
           <>
           <p className="results-hint">Clips are saved as MP4 files in your Downloads folder. Higher scores mean stronger detected changes, not guaranteed highlights.</p>
           <div className="candidate-list">
-            {displayedCandidates.map((candidate, index) => (
-              <article className="candidate-row" key={`${candidate.peakMs}-${index}`}>
-                <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
-                <div className="candidate-title"><strong>{candidate.title}</strong><span>{candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span></div>
-                <div className="candidate-times">
-                  <span><small>CLIP</small>{formatTimestamp(candidate.startMs)} – {formatTimestamp(candidate.endMs)}</span>
-                  <span className="peak-time"><small>BEST MOMENT</small>{formatTimestamp(candidate.peakMs)}</span>
-                </div>
-                <div className="candidate-score"><strong>{candidate.score}<small>/100</small></strong><span>HIGHLIGHT SCORE</span></div>
-                <p className="candidate-explanation">{candidate.explanation}</p>
-                <div className="signal-list">{candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}</div>
-                {candidate.clipPath && <p className="clip-saved"><i /> Saved · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
-              </article>
-            ))}
+            {displayedCandidates.map((candidate, index) => {
+              const key = candidateKey(candidate, index);
+              const selected = selectedKeys.includes(key);
+              return (
+                <article className={`candidate-row ${selected ? "is-selected" : ""}`} key={key}>
+                  <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
+                  <div className="candidate-title"><strong>{candidate.title}</strong><span>{candidate.titleSource === "local_model" ? "LOCAL AI TITLE" : "EVIDENCE TITLE"}</span></div>
+                  <div className="candidate-times">
+                    <span><small>CLIP</small>{formatTimestamp(candidate.startMs)} – {formatTimestamp(candidate.endMs)}</span>
+                    <span className="peak-time"><small>BEST MOMENT</small>{formatTimestamp(candidate.peakMs)}</span>
+                  </div>
+                  <div className="candidate-score"><strong>{candidate.score}<small>/100</small></strong><span>HIGHLIGHT SCORE</span></div>
+                  <p className="candidate-explanation">{candidate.explanation}</p>
+                  <div className="signal-list">{candidate.signals.map((signal) => <span key={signal}>{signal.replaceAll("_", " ")}</span>)}</div>
+                  {candidate.clipPath && <p className="clip-saved"><i /> Saved · {candidate.clipPath.split(/[\\/]/).pop()}</p>}
+                  <div className="candidate-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      disabled={studioBusy || active}
+                      onClick={() => void openStudio([candidate], candidate.peakMs)}
+                    >
+                      Create short
+                    </button>
+                    <label className="candidate-select">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={studioBusy || active}
+                        onChange={() => toggleSelection(key)}
+                      />
+                      <span>Add to batch</span>
+                    </label>
+                  </div>
+                </article>
+              );
+            })}
           </div>
           </>
         ) : (
@@ -403,6 +483,20 @@ export default function App() {
         {!!displayedNotices.length && <ul className="notice-list">{displayedNotices.map((notice) => <li key={notice}>{notice}</li>)}</ul>}
       </section>
 
+      {studio && (
+        <div ref={studioRef}>
+          <Studio
+            key={`${studio.jobId}-${studio.clips.map((clip) => clip.key).join("|")}`}
+            jobId={studio.jobId}
+            sourcePath={studio.path}
+            media={studio.media}
+            clips={studio.clips}
+            initialPositionMs={studio.initialPositionMs}
+            onClose={() => setStudio(null)}
+          />
+        </div>
+      )}
+
       <section className="history-section">
         <div className="section-heading">
           <div><p className="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2>Recent recordings</h2></div>
@@ -412,7 +506,7 @@ export default function App() {
           <div className="history-list">
             {history.map((item) => (
               <button className={`history-item ${selectedHistoryId === item.id ? "selected" : ""}`} type="button" key={item.id}
-                disabled={active} onClick={() => { setSelectedHistoryId(item.id); setMedia(null); }}>
+                disabled={active} onClick={() => { setSelectedHistoryId(item.id); setMedia(null); setStudio(null); }}>
                 <span className={`history-status status-${item.status}`}>{item.status === "completed" ? "Ready" : item.status === "failed" ? "Needs attention" : item.status}</span>
                 <span className="history-name">{item.sourceName}</span>
                 <span className="history-detail">{item.candidates.length} moments · {new Date(item.createdAt).toLocaleDateString()}</span>

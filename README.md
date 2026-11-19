@@ -1,6 +1,6 @@
 # Luna — local stream analyzer
 
-Luna analyzes local gaming recordings, returns ranked timestamp suggestions, and saves each suggested segment as an MP4. It accepts local MP4, MKV, and WebM files and does not download platform streams or upload media.
+Luna analyzes local gaming recordings, returns ranked timestamp suggestions, and turns any of them into a framed short-form MP4 for YouTube Shorts, TikTok, or Instagram Reels. It accepts local MP4, MKV, and WebM files and does not download platform streams or upload media.
 
 ## Architecture
 
@@ -20,10 +20,28 @@ The frontend stays responsive while Rust reads worker events on a background thr
 - Fuse audio, visual, VAD speech, and transcript-reaction evidence; coalesce duplicate track observations; attach a reaction only to the nearest event; clamp, merge, and rank candidates by score with a minimum separation.
 - Return start, peak, and end timestamps. The peak is the strongest evidence sample; the clip window adds 15 seconds before and 10 seconds after the evidence cluster, capped at 45 seconds.
 - Show live worker stages/progress, cancel an analysis, view results, and reopen saved analysis history.
-- Export each detected segment as an MP4 in `Downloads/<source video name>/` with a descriptive filename. Export remains secondary to the ranked timestamps.
+- Export each detected segment as an MP4 in `Downloads/<source video name>/` with a descriptive filename.
+- Open one highlight, or a batch of selected highlights, in the Short-form Studio and render a new short-form MP4 (see below).
 - Recover unfinished jobs as failed after an app restart.
 
 The score is a transparent ranking aid, not a probability of a true highlight. Visual-only candidates must clear a magnitude gate, and audio-only candidates need a stronger anomaly than fused audio-plus-visual evidence.
+
+## Short-form Studio
+
+Selecting **Create short** on a candidate, or ticking **Add to batch** on several and choosing **Shape N shorts**, opens the Short-form Studio on that analysis. The studio plays the original recording with the chosen composition, keeps the detected peak inside the clip, and renders a new MP4 without modifying the source.
+
+- **Output presets:** Vertical 1080 × 1920 (default), Square 1080 × 1080, and Original resolution.
+- **Presentation modes:**
+  - **Full frame** (default) keeps the entire source frame — minimap, kill feed, HUD, and scoreboard included — and fills the rest of the canvas with a blurred, darkened cover of the same footage.
+  - **Crop** fills the canvas without stretching and exposes horizontal/vertical crop positions, centered by default.
+  - **Original** preserves the source shape inside the canvas with a dark background.
+- **Boundaries:** start and end sliders clamp the clip to 1–180 seconds, keep the detected peak inside the window, and show the detected window plus the current selection on a timeline. **Reset** returns to the detected boundaries. The clip is never silently truncated.
+- **Captions (optional):** burned in only from the saved local Faster-Whisper words/segments, grouped into at most two lines with real timestamps. The toggle is disabled when the analysis has no transcript, and a missing speech model never blocks export.
+- **Export:** single or batch (up to 50 clips), a chosen output folder (default `Downloads/Luna Shorts/<source video name>/`), CRF 14–28, live per-clip progress, cancellation, retry for failed/cancelled items, and Open/Show folder for finished files. Rendered files are written as a hidden partial and renamed on success, so a cancelled or failed export never leaves a broken MP4.
+
+The preview and the renderer share one geometry implementation, mirrored in `src/ui/framing.ts` and `worker/luna_worker/framing.py`; the TypeScript mirror is checked against the Python version across 216 preset/mode/crop/source combinations with zero mismatches.
+
+Rendering runs in `worker/export_worker.py` (a second Python process, separate from analysis) and shells out to FFmpeg with libx264 `veryfast`, `-pix_fmt yuv420p`, AAC audio when the source has it, `+faststart`, and passthrough frame timing. Every job is persisted in the `clip_exports` table (migration `003_shortform_exports.sql`) with its source, candidate, original and adjusted timestamps, preset, mode, crop, caption flag, CRF, output path, and status.
 
 ## Measured verification
 
@@ -33,6 +51,8 @@ These are local measurements, not a calibrated accuracy claim. The full procedur
 - **Desktop wall time:** 5.18 s including import-to-results polling and MP4 export; the persisted job timestamps span 4.72 s. Audio and speech were correctly reported as skipped because the AAC track is digitally silent.
 - **Packaged speech path:** a 12 s synthetic clip with spoken “Oh my god, that was insane!” and a visual flash produced one candidate at score 100 with `Audio Anomaly`, `Speech Reaction`, and `Visual Activity`; the explanation included the transcribed reaction. Wall time was 3.87 s. This verifies Silero VAD and the local Faster-Whisper model inside the real desktop app, not only in Python.
 - **Synthetic long recording:** the 3-hour 160×90/1 fps file with a known audio+visual event at 90:00 completed in **32.2 s** (335× real time), returned one candidate with **0 ms peak error**, and sampled **80.6 MiB** peak RSS for Python plus children. This is a low-complexity synthetic result, not a real-game accuracy claim. Run `python worker/tests/benchmark_synthetic.py` to repeat it.
+- **Short-form rendering (v0.3):** `1026.mp4` (1920×1080, 30 fps, AAC) rendered from the detected candidate at 25.0–36.6 s in five configurations — Vertical full frame, Vertical crop at both horizontal extremes, Square crop, and Original. Every output was probed: H.264, `yuv420p`, 30/1 fps, AAC 44.1 kHz stereo, duration **11.600 s** (matching the requested range to the millisecond), at 1080×1920, 1080×1080, and 1920×1080 respectively. Extracted frames confirmed Full frame preserves both horizontal edges and the full HUD over a blurred cover, the two crop extremes show opposite sides of the frame without stretching, and Original keeps the native 16:9 framing. Render wall time was 2.0–10.1 s per 11.6 s clip on CPU.
+- **Packaged v0.3 launch:** `luna.exe` started from the release build with the previous v0.2 database, migrated it from schema version 2 to 3 (`clip_exports` table plus `jobs.transcript_json`), and preserved all 10 jobs, 44 candidates, and completed analyses.
 - **Non-gameplay negatives:** the Kenta “replay” files are desktop/browser screen recordings, not gameplay, and are excluded from gaming accuracy. They produced 0–3 visual candidates (scores 30–40); the 60 s TikTok feed produced two fused visual+audio candidates (scores 83 and 64). These show the detector’s behavior on menu/scene content, not whether it finds gaming highlights.
 
 Only one real gaming recording was available, so precision and recall above are single-sample observations. Do not generalize them to a game library.
@@ -96,7 +116,7 @@ npm run test:worker
 cargo test --manifest-path src-tauri/logic-tests/Cargo.toml
 ```
 
-`npm run test:worker` runs 20 Python tests covering visual-only detection, digitally silent audio, multi-track coalescing, model discovery, cancellation, the worker protocol, and clip export. The Rust logic tests compile the same `src-tauri/src/logic.rs` used by the desktop crate and cover extension filtering, frame-rate formatting, job IDs, and the worker idle-timeout policy.
+`npm run test:worker` runs 37 Python tests. Besides detection, they render real files through the short-form pipeline and assert on FFprobe output and decoded pixels: canvas dimensions per preset, `yuv420p`, audio presence/absence, Full-frame edge preservation, crop position at both extremes, burned-in captions, cancellation cleanup, and the export worker's JSONL protocol. The Rust logic tests compile the same `src-tauri/src/logic.rs` used by the desktop crate and cover extension filtering, frame-rate formatting, job IDs, worker idle-timeout policy, and short-form setting validation (including that the Original preset forces source framing).
 
 On this Windows GNU toolchain, a Tauri-linked Rust test binary fails at process startup with `STATUS_ENTRYPOINT_NOT_FOUND` (`0xc0000139`), while the desktop binary builds and runs normally. The `logic-tests` crate is the verified alternative: `cargo test --manifest-path src-tauri/logic-tests/Cargo.toml` passes 3/3 without linking Tauri. Do not report the Tauri test harness as passing on this machine.
 
@@ -109,5 +129,8 @@ On this Windows GNU toolchain, a Tauri-linked Rust test binary fails at process 
 - Speech is used as positive evidence. VAD does not suppress every audio anomaly caused by commentary, so speech-heavy streams can still surface loud-talk candidates; this was not tuned on a labeled speech-heavy gameplay set.
 - VAD and transcription depend on the optional local packages/models. The app remains useful without them.
 - One analysis runs at a time. The worker decodes the source separately for audio and video.
-- No subtitles, cloud sources, account integration, or platform stream downloading. Clip title quality depends on the separate optional local-token model; evidence titles are used when it is unavailable.
+- Captions exist only as burned-in text generated from saved transcription. There is no editable subtitle track, cloud source, account integration, or platform stream downloading. Clip title quality depends on the separate optional local-token model; evidence titles are used when it is unavailable.
+- Short-form framing is deterministic cropping and letterboxing, not AI reframing: it never tracks a subject inside the frame.
+- Exports always use CPU libx264; GPU encoders are not offered, so long batches are slower on weak hardware than an NVENC build would be.
+- One short-form export batch runs at a time, and only one analysis runs at a time.
 - The Rust Tauri-linked unit-test harness remains blocked by the toolchain issue described above; the desktop build and the Tauri-free logic tests are verified.

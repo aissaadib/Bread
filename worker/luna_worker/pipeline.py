@@ -108,5 +108,5 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
         "complete", progress=100, duration_seconds=info["duration_seconds"],
         candidate_count=len(candidates), analysis_version=ANALYSIS_VERSION,
         capabilities={"audio": info["has_audio"], "visual": True, "speech_detection": vad is not None,
-                      "transcription": bool(transcript)}, notices=notices,
+                      "transcription": bool(transcript)}, notices=notices, transcript=transcript,
     )

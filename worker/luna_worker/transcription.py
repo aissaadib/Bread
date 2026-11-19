@@ -81,7 +81,7 @@ def transcribe(path: str, progress: Callable[[str], None]) -> tuple[list[dict], 
                              cpu_threads=max(1, min(4, os.cpu_count() or 1)),
                              num_workers=1, local_files_only=True)
         segments, info = model.transcribe(
-            path, beam_size=1, vad_filter=False, word_timestamps=False,
+            path, beam_size=1, vad_filter=False, word_timestamps=True,
             condition_on_previous_text=False,
         )
         transcript: list[dict] = []
@@ -89,11 +89,22 @@ def transcribe(path: str, progress: Callable[[str], None]) -> tuple[list[dict], 
             text = segment.text.strip()
             if not text:
                 continue
+            words = []
+            for word in getattr(segment, "words", None) or []:
+                value = str(getattr(word, "word", "")).strip()
+                if not value:
+                    continue
+                words.append({
+                    "start_seconds": float(word.start),
+                    "end_seconds": float(word.end),
+                    "word": value,
+                })
             transcript.append({
                 "start_seconds": float(segment.start),
                 "end_seconds": float(segment.end),
                 "text": text,
                 "language": info.language,
+                "words": words,
             })
             if index % 25 == 0:
                 progress(f"Transcribed {index} speech segments")
