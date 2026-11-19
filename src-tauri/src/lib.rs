@@ -1,3 +1,4 @@
+mod logic;
 mod storage;
 
 use serde::Serialize;
@@ -8,18 +9,16 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use storage::{Database, HistoryEntry};
 
-static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MAX_WORKER_MESSAGE_BYTES: usize = 1_048_576;
 const MAX_WORKER_RUNTIME: Duration = Duration::from_secs(12 * 60 * 60);
-const MIN_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_ANALYSIS_CONFIG: &str = include_str!("../../worker/config.json");
 
 struct AppState {
@@ -73,7 +72,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
         (source_id, database.source_duration_seconds(source_id)?)
     };
     let output_dir = clip_output_dir(&app, &path)?;
-    let worker_idle_timeout = Duration::from_secs_f64((duration_seconds * 0.07).max(MIN_WORKER_IDLE_TIMEOUT.as_secs_f64()));
+    let idle_timeout = worker_idle_timeout(duration_seconds);
     let job_id = new_job_id();
     state.database.lock().map_err(|_| "Database lock is unavailable.".to_string())?
         .create_job(&job_id, source_id, DEFAULT_ANALYSIS_CONFIG)?;
@@ -110,7 +109,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     let state_thread = Arc::clone(state.inner());
     let thread_job_id = job_id.clone();
     thread::spawn(move || {
-        monitor_worker(app_thread, state_thread, thread_job_id, child, stdout, stderr, worker_idle_timeout);
+        monitor_worker(app_thread, state_thread, thread_job_id, child, stdout, stderr, idle_timeout);
     });
     Ok(job_id)
 }
@@ -188,17 +187,7 @@ fn validate_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn supported_extension(extension: &str) -> bool {
-    ["mp4", "mkv", "webm"].contains(&extension.to_ascii_lowercase().as_str())
-}
-
-fn normalize_rate(rate: &str) -> String {
-    let mut parts = rate.split('/');
-    match (parts.next().and_then(|value| value.parse::<f64>().ok()), parts.next().and_then(|value| value.parse::<f64>().ok())) {
-        (Some(numerator), Some(denominator)) if denominator > 0.0 => format!("{:.2} fps", numerator / denominator),
-        _ => rate.to_string(),
-    }
-}
+pub use logic::{normalize_rate, supported_extension};
 
 fn resolve_worker(app: &AppHandle) -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
@@ -237,6 +226,10 @@ fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
     if let Some(path) = explicit {
         candidates.push((PathBuf::from(path), Vec::new()));
     } else {
+        let project_python = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.venv/Scripts/python.exe");
+        if project_python.is_file() {
+            candidates.push((project_python, Vec::new()));
+        }
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
             let local_app_data = PathBuf::from(local_app_data);
             candidates.push((local_app_data.join("Python/bin/python.exe"), Vec::new()));
@@ -273,11 +266,7 @@ fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
     Err("Python 3.11 or newer was not found. Install Python or set LUNA_PYTHON to its executable.".into())
 }
 
-fn new_job_id() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let sequence = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{sequence}", std::process::id())
-}
+pub use logic::{new_job_id, worker_idle_timeout};
 
 fn monitor_worker(app: AppHandle, state: Arc<AppState>, job_id: String, mut child: Child,
                   stdout: impl Read + Send + 'static, stderr: impl Read + Send + 'static,
@@ -417,30 +406,4 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![register_media, list_history, start_analysis, cancel_analysis])
         .run(tauri::generate_context!())
         .expect("Luna desktop runtime failed");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{normalize_rate, new_job_id, supported_extension};
-    use std::path::Path;
-
-    #[test]
-    fn supported_media_extensions_are_case_insensitive() {
-        for path in ["capture.mp4", "capture.MKV", "capture.webm"] {
-            let extension = Path::new(path).extension().and_then(|value| value.to_str()).unwrap_or_default();
-            assert!(supported_extension(extension));
-        }
-        for path in ["capture.mov", "capture", "capture.mp4.exe"] {
-            let extension = Path::new(path).extension().and_then(|value| value.to_str()).unwrap_or_default();
-            assert!(!supported_extension(extension));
-        }
-    }
-
-    #[test]
-    fn frame_rates_are_formatted_and_job_ids_are_distinct() {
-        assert_eq!(normalize_rate("30000/1001"), "29.97 fps");
-        assert_eq!(normalize_rate("24/1"), "24.00 fps");
-        assert_eq!(normalize_rate("unknown"), "unknown");
-        assert_ne!(new_job_id(), new_job_id());
-    }
 }

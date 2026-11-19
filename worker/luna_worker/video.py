@@ -8,6 +8,36 @@ from typing import Callable
 
 from . import DEFAULT_CONFIG
 
+try:  # NumPy keeps frame statistics cheap on long recordings but is optional.
+    import numpy as np
+except Exception:  # pragma: no cover - exercised only in minimal Python installations.
+    np = None
+
+
+def _histogram(frame: bytes) -> list[float]:
+    bins = [0] * 16
+    for value in frame:
+        bins[value >> 4] += 1
+    total = len(frame) or 1
+    return [count / total for count in bins]
+
+
+def _frame_difference(previous: bytes, current: bytes) -> float:
+    total = 0
+    for before, after in zip(previous, current):
+        total += abs(before - after)
+    return total / max(1, len(current)) / 255.0
+
+
+def _histogram_distance(previous: list[float], current: list[float]) -> float:
+    return 0.5 * sum(abs(before - after) for before, after in zip(previous, current))
+
+
+def _activity_magnitude(value: float, threshold: float, base: float, span: float, scale: float) -> float:
+    if value < threshold:
+        return 0.0
+    return min(1.0, base + min(span, (value - threshold) / max(0.03, scale) * span))
+
 
 def analyze(path: str, duration_seconds: float, cancelled: threading.Event,
             progress: Callable[[float], None], config: dict | None = None) -> list[dict]:
@@ -45,8 +75,11 @@ def analyze(path: str, duration_seconds: float, cancelled: threading.Event,
 
     stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
     stderr_thread.start()
-    frames: list[tuple[float, float]] = []
-    previous: bytes | None = None
+    differences: list[float] = []
+    histograms: list[float] = []
+    previous_frame: bytes | None = None
+    previous_values = None
+    previous_histogram: list[float] | None = None
     frame_index = 0
     next_progress = 55
     try:
@@ -58,10 +91,23 @@ def analyze(path: str, duration_seconds: float, cancelled: threading.Event,
             frame = process.stdout.read(frame_bytes)
             if len(frame) != frame_bytes:
                 break
-            if previous is not None:
-                difference = sum(abs(a - b) for a, b in zip(previous, frame)) / frame_bytes / 255.0
-                frames.append((frame_index * interval_seconds, difference))
-            previous = frame
+            if np is not None:
+                values = np.frombuffer(frame, dtype=np.uint8)
+                counts = np.histogram(values, bins=16, range=(0, 256))[0].astype(np.float64)
+                histogram = (counts / max(1.0, float(counts.sum()))).tolist()
+                if previous_values is not None:
+                    difference = float(np.abs(values.astype(np.int16) - previous_values.astype(np.int16)).mean()) / 255.0
+                    differences.append(difference)
+                    histograms.append(_histogram_distance(previous_histogram or histogram, histogram))
+                previous_values = values
+                previous_histogram = histogram
+            else:
+                histogram = _histogram(frame)
+                if previous_frame is not None and previous_histogram is not None:
+                    differences.append(_frame_difference(previous_frame, frame))
+                    histograms.append(_histogram_distance(previous_histogram, histogram))
+                previous_frame = frame
+                previous_histogram = histogram
             frame_index += 1
             percent = min(90, 50 + int(frame_index * interval_seconds / max(1.0, duration_seconds) * 40))
             if percent >= next_progress:
@@ -86,22 +132,38 @@ def analyze(path: str, duration_seconds: float, cancelled: threading.Event,
         raise InterruptedError("Analysis cancelled.")
 
     observations: list[dict] = []
-    for index, (timestamp, change) in enumerate(frames):
-        context = int(settings["baseline_context_frames"])
+    context = int(settings["baseline_context_frames"])
+    minimum_motion = float(settings["minimum_motion"])
+    minimum_histogram = float(settings["minimum_histogram_change"])
+    minimum_magnitude = float(settings["minimum_visual_magnitude"])
+    for index, (difference, histogram_change) in enumerate(zip(differences, histograms)):
         left = max(0, index - context)
-        right = min(len(frames), index + context + 1)
-        baseline = [frames[i][1] for i in range(left, right) if i != index]
-        if not baseline:
+        right = min(len(differences), index + context + 1)
+        motion_baseline = [differences[i] for i in range(left, right) if i != index]
+        histogram_baseline = [histograms[i] for i in range(left, right) if i != index]
+        if not motion_baseline or not histogram_baseline:
             continue
-        median = statistics.median(baseline)
-        mad = statistics.median(abs(value - median) for value in baseline)
-        threshold = max(float(settings["minimum_change"]), median + 3.0 * mad)
-        if change >= threshold:
-            magnitude = min(1.0, 0.25 + (change - threshold) / max(0.2, 1.0 - threshold))
-            observations.append({
-                "timestamp_ms": int(timestamp * 1000),
-                "signal": "visual_activity",
-                "magnitude": round(magnitude, 4),
-                "metadata": {"frame_difference": round(change, 4), "local_baseline": round(median, 4)},
-            })
+        motion_median = statistics.median(motion_baseline)
+        motion_mad = statistics.median(abs(value - motion_median) for value in motion_baseline)
+        histogram_median = statistics.median(histogram_baseline)
+        histogram_mad = statistics.median(abs(value - histogram_median) for value in histogram_baseline)
+        motion_threshold = max(minimum_motion, motion_median + 3.0 * motion_mad)
+        histogram_threshold = max(minimum_histogram, histogram_median + 3.0 * histogram_mad)
+
+        motion_magnitude = _activity_magnitude(difference, motion_threshold, 0.50, 0.50, 0.25)
+        histogram_magnitude = _activity_magnitude(histogram_change, histogram_threshold, 0.40, 0.60, 0.30)
+        magnitude = max(motion_magnitude, histogram_magnitude)
+        if magnitude < minimum_magnitude:
+            continue
+        observations.append({
+            "timestamp_ms": int((index + 1) * interval_seconds * 1000),
+            "signal": "visual_activity",
+            "magnitude": round(magnitude, 4),
+            "metadata": {
+                "frame_difference": round(difference, 4),
+                "motion_baseline": round(motion_median, 4),
+                "histogram_change": round(histogram_change, 4),
+                "histogram_baseline": round(histogram_median, 4),
+            },
+        })
     return observations

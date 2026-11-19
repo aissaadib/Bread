@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-import os
 import threading
 from typing import Callable
 
 from . import ANALYSIS_VERSION, DEFAULT_CONFIG
 from . import audio, clips, media, ranking, titles, transcription, video
+
+
+def _heartbeat(stop: threading.Event, emit: Callable[..., None], stage: str, progress: int) -> None:
+    """Keep the desktop host's idle timer alive while a model works without natural progress."""
+    while not stop.wait(10):
+        try:
+            emit("progress", stage=stage, progress=progress)
+        except OSError:
+            return
 
 
 def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], config: dict | None = None,
@@ -16,22 +24,32 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
     observations: list[dict] = []
     notices: list[str] = []
     speech: list[dict] = []
+    audio_summary = {"active_windows": 0, "total_windows": 0, "speech_seconds": 0.0}
+
+    vad, vad_notice = audio.load_vad() if info["has_audio"] else (None, None)
+    if vad_notice:
+        notices.append(vad_notice)
 
     emit("stage", stage="analyzing_audio", progress=4)
     audio_tracks = max(1, int(info["audio_tracks"]))
     for stream_index in range(audio_tracks if info["has_audio"] else 1):
-        audio_observations, speech_intervals, notice = audio.analyze(
+        audio_observations, speech_intervals, notice, summary = audio.analyze(
             path, info["has_audio"], info["duration_seconds"], cancelled,
             lambda percent, index=stream_index: emit(
                 "progress", stage="analyzing_audio",
                 progress=4 + int(((index + percent / 100) / audio_tracks) * 46),
             ),
-            config, audio_stream_index=stream_index,
+            config, audio_stream_index=stream_index, vad=vad,
         )
         observations.extend(audio_observations)
         speech.extend(speech_intervals)
+        audio_summary["active_windows"] += int(summary["active_windows"])
+        audio_summary["total_windows"] += int(summary["total_windows"])
+        audio_summary["speech_seconds"] += float(summary["speech_seconds"])
         if notice and notice not in notices:
             notices.append(notice)
+    if info["has_audio"] and audio_summary["active_windows"] == 0:
+        notices.append("The audio track is effectively silent; audio and speech signals were skipped.")
 
     if cancelled.is_set():
         raise InterruptedError("Analysis cancelled.")
@@ -44,13 +62,25 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
     observations.extend(visual_observations)
 
     transcript: list[dict] = []
-    if os.environ.get("LUNA_WHISPER_MODEL"):
+    audible = bool(info["has_audio"]) and audio_summary["active_windows"] > 0
+    if audible and transcription.available():
         emit("stage", stage="transcribing", progress=91)
-        transcript, notice = transcription.transcribe(path, lambda message: emit("notice", message=message))
+        stop = threading.Event()
+        heartbeat = threading.Thread(target=_heartbeat, args=(stop, emit, "transcribing", 91), daemon=True)
+        heartbeat.start()
+        try:
+            transcript, notice = transcription.transcribe(path, lambda message: emit("notice", message=message))
+        finally:
+            stop.set()
+            heartbeat.join(timeout=2)
         if notice:
             notices.append(notice)
-    else:
-        notices.append("Transcription is optional and is not configured; no model was downloaded.")
+        elif not transcript:
+            notices.append("Local transcription ran but found no speech segments.")
+    elif audible:
+        notices.append("Transcription is optional; no local Whisper model was found. Set LUNA_WHISPER_MODEL or place one under .models.")
+    elif info["has_audio"]:
+        notices.append("Transcription was skipped because the audio track is effectively silent.")
 
     if cancelled.is_set():
         raise InterruptedError("Analysis cancelled.")
@@ -77,6 +107,6 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
     emit(
         "complete", progress=100, duration_seconds=info["duration_seconds"],
         candidate_count=len(candidates), analysis_version=ANALYSIS_VERSION,
-        capabilities={"audio": info["has_audio"], "visual": True, "speech_detection": bool(speech),
+        capabilities={"audio": info["has_audio"], "visual": True, "speech_detection": vad is not None,
                       "transcription": bool(transcript)}, notices=notices,
     )

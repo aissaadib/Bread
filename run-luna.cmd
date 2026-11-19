@@ -1,8 +1,12 @@
 @echo off
 set "PROJECT_ROOT=%~dp0"
 set "SOURCE_LOCALAPPDATA=%LOCALAPPDATA%"
-if exist "%SOURCE_LOCALAPPDATA%\Python\bin\python.exe" set "LUNA_PYTHON=%SOURCE_LOCALAPPDATA%\Python\bin\python.exe"
-for /d %%P in ("%SOURCE_LOCALAPPDATA%\Programs\Python\Python*") do if exist "%%~fP\python.exe" set "LUNA_PYTHON=%%~fP\python.exe"
+if exist "%PROJECT_ROOT%.venv\Scripts\python.exe" (
+  set "LUNA_PYTHON=%PROJECT_ROOT%.venv\Scripts\python.exe"
+) else (
+  if exist "%SOURCE_LOCALAPPDATA%\Python\bin\python.exe" set "LUNA_PYTHON=%SOURCE_LOCALAPPDATA%\Python\bin\python.exe"
+  for /d %%P in ("%SOURCE_LOCALAPPDATA%\Programs\Python\Python*") do if exist "%%~fP\python.exe" set "LUNA_PYTHON=%%~fP\python.exe"
+)
 set "LUNA_DATA_DIR=%PROJECT_ROOT%.runtime\data"
 set "TORCH_HOME=%PROJECT_ROOT%.runtime\torch"
 set "APPDATA=%PROJECT_ROOT%.runtime\roaming"

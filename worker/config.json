@@ -1,32 +1,40 @@
 {
-  "analysis_version": "0.1.0",
+  "analysis_version": "0.2.0",
   "audio": {
     "sample_rate": 16000,
     "window_seconds": 1,
-    "baseline_context_seconds": 30,
+    "long_baseline_seconds": 60,
+    "short_baseline_seconds": 8,
     "minimum_baseline_delta_db": 6.0,
-    "minimum_rms_dbfs": -80.0,
-    "minimum_peak": 0.001,
-    "minimum_zcr_delta": 0.12,
+    "maximum_baseline_delta_db": 24.0,
+    "minimum_short_delta_db": 3.0,
+    "minimum_rms_dbfs": -75.0,
+    "minimum_peak": 0.0025,
+    "minimum_spectral_flux": 0.12,
     "vad_chunk_seconds": 10
   },
   "video": {
-    "sample_rate_fps": 0.5,
+    "sample_rate_fps": 1.0,
     "width": 160,
     "height": 90,
-    "minimum_change": 0.12,
-    "baseline_context_frames": 30
+    "baseline_context_frames": 30,
+    "minimum_motion": 0.03,
+    "minimum_histogram_change": 0.10,
+    "minimum_visual_magnitude": 0.45
   },
   "ranking": {
     "pre_context_ms": 15000,
     "post_context_ms": 10000,
     "max_duration_ms": 45000,
-    "merge_gap_ms": 16000,
-    "max_event_span_ms": 30000,
+    "merge_gap_ms": 6000,
+    "max_event_span_ms": 25000,
+    "minimum_separation_ms": 6000,
+    "minimum_score": 28,
     "weights": {
-      "audio": 45,
-      "visual": 22,
-      "speech": 18
+      "audio": 50,
+      "visual": 40,
+      "speech": 15,
+      "scene": 10
     }
   }
 }

@@ -4,9 +4,11 @@ import os
 import json
 import shutil
 import subprocess
+import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 import sys
@@ -18,6 +20,7 @@ from luna_worker.media import MediaError, inspect_media
 from luna_worker.pipeline import analyze
 from luna_worker.ranking import rank
 from luna_worker.titles import generate
+from luna_worker import transcription
 
 ARTIFACTS = ROOT / ".test-output"
 
@@ -41,6 +44,20 @@ class AnalysisTests(unittest.TestCase):
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
             "color=c=black:s=160x90:r=2:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p",
             str(cls.silent_recording),
+        ], check=True, capture_output=True, env=os.environ.copy())
+        cls.visual_only_recording = ARTIFACTS / "visual-only.mp4"
+        subprocess.run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "color=c=black:s=320x180:r=10:d=8,drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:"
+            "enable='between(t,3,4.9)'", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(cls.visual_only_recording),
+        ], check=True, capture_output=True, env=os.environ.copy())
+        cls.silent_audio_recording = ARTIFACTS / "silent-audio.mp4"
+        subprocess.run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "color=c=black:s=160x90:r=2:d=4", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(cls.silent_audio_recording),
         ], check=True, capture_output=True, env=os.environ.copy())
 
     @classmethod
@@ -146,6 +163,64 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(completed["candidate_count"], 0)
         self.assertTrue(any("No audio track" in notice for notice in completed["notices"]))
 
+    def test_visual_only_recording_produces_a_candidate(self) -> None:
+        emitted: list[tuple[str, dict]] = []
+        analyze(str(self.visual_only_recording), threading.Event(),
+                lambda kind, **data: emitted.append((kind, data)))
+        candidates = [data["candidate"] for kind, data in emitted if kind == "candidate"]
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertIn("visual_activity", candidate["signals"])
+        self.assertNotIn("audio_anomaly", candidate["signals"])
+        self.assertLessEqual(candidate["start_ms"], 3_000)
+        self.assertGreaterEqual(candidate["peak_ms"], 2_500)
+        self.assertLessEqual(candidate["peak_ms"], 5_500)
+        self.assertGreaterEqual(candidate["score"], 28)
+
+    def test_digitally_silent_audio_is_not_flagged(self) -> None:
+        emitted: list[tuple[str, dict]] = []
+        analyze(str(self.silent_audio_recording), threading.Event(),
+                lambda kind, **data: emitted.append((kind, data)))
+        completed = next(data for kind, data in emitted if kind == "complete")
+        self.assertEqual(completed["candidate_count"], 0)
+        self.assertTrue(any("effectively silent" in notice for notice in completed["notices"]))
+
+    def test_low_confidence_visual_noise_is_filtered(self) -> None:
+        results = rank(
+            [{"timestamp_ms": 5_000, "signal": "visual_activity", "magnitude": 0.4, "metadata": {}}],
+            [], [], 20.0,
+        )
+        self.assertEqual(results, [])
+
+    def test_reaction_is_only_attached_to_the_nearest_event(self) -> None:
+        transcript = [{"start_seconds": 5.4, "end_seconds": 8.4,
+                       "text": "Oh my god, that was insane.", "language": "en"}]
+        results = rank(
+            [
+                {"timestamp_ms": 6_000, "signal": "visual_activity", "magnitude": 0.8, "metadata": {}},
+                {"timestamp_ms": 15_000, "signal": "visual_activity", "magnitude": 0.8, "metadata": {}},
+            ],
+            [], transcript, 20.0,
+        )
+        self.assertEqual(len(results), 2)
+        self.assertIn("speech_reaction", results[0]["signals"])
+        self.assertNotIn("speech_reaction", results[1]["signals"])
+
+    def test_duplicate_audio_track_observations_are_coalesced(self) -> None:
+        results = rank(
+            [
+                {"timestamp_ms": 10_000, "signal": "audio_anomaly", "magnitude": 0.7,
+                 "metadata": {"audio_track": 1, "delta_db": 10}},
+                {"timestamp_ms": 10_000, "signal": "audio_anomaly", "magnitude": 0.9,
+                 "metadata": {"audio_track": 2, "delta_db": 12}},
+            ],
+            [], [], 20.0,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0]["evidence"]), 1)
+        self.assertEqual(results[0]["evidence"][0]["magnitude"], 0.9)
+        self.assertEqual(results[0]["evidence"][0]["metadata"]["audio_tracks"], [1, 2])
+
     def test_worker_jsonl_protocol_carries_job_ids_and_terminal_result(self) -> None:
         from luna_worker import DEFAULT_CONFIG
 
@@ -206,6 +281,32 @@ class AnalysisTests(unittest.TestCase):
         events = [json.loads(line) for line in output.splitlines()]
         self.assertEqual(process.returncode, 2)
         self.assertEqual(events[-1]["type"], "cancelled")
+
+    def test_whisper_model_discovery_honors_models_directory_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            models = Path(temp) / ".models"
+            model = models / "faster-whisper-base.en"
+            model.mkdir(parents=True)
+            (model / "model.bin").write_bytes(b"stub")
+            with mock.patch.dict(os.environ, {"LUNA_MODELS_DIR": str(models), "LUNA_WHISPER_MODEL": ""}):
+                self.assertTrue(transcription.available())
+                self.assertEqual(transcription._resolve_model_path(), model)
+
+    def test_whisper_model_discovery_walks_up_from_packaged_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = root / ".models" / "faster-whisper-base.en"
+            model.mkdir(parents=True)
+            (model / "model.bin").write_bytes(b"stub")
+            packaged_worker = root / "release" / "worker"
+            packaged_worker.mkdir(parents=True)
+            previous = Path.cwd()
+            os.chdir(packaged_worker)
+            try:
+                with mock.patch.dict(os.environ, {"LUNA_MODELS_DIR": "", "LUNA_WHISPER_MODEL": ""}):
+                    self.assertEqual(transcription._resolve_model_path(), model)
+            finally:
+                os.chdir(previous)
 
 
 if __name__ == "__main__":

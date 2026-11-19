@@ -103,9 +103,13 @@ impl Database {
     }
 
     pub(crate) fn create_job(&mut self, id: &str, source_id: i64, config_json: &str) -> Result<(), String> {
+        let analysis_version = serde_json::from_str::<serde_json::Value>(config_json)
+            .ok()
+            .and_then(|config| config.get("analysis_version").and_then(|value| value.as_str()).map(str::to_owned))
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         self.connection.execute(
-            "INSERT INTO jobs(id,source_id,status,stage,progress,analysis_version,config_json) VALUES(?1,?2,'queued','queued',0,'0.1.0',?3)",
-            params![id, source_id, config_json],
+            "INSERT INTO jobs(id,source_id,status,stage,progress,analysis_version,config_json) VALUES(?1,?2,'queued','queued',0,?4,?3)",
+            params![id, source_id, config_json, analysis_version],
         ).map_err(db_error)?;
         Ok(())
     }
