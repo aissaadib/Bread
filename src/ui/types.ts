@@ -25,6 +25,15 @@ export type Candidate = {
   title: string;
   titleSource: string;
   clipPath: string | null;
+  origin?: string;
+  aiTitle?: string | null;
+  aiEventType?: string | null;
+  aiReason?: string | null;
+  aiScore?: number | null;
+  aiPeakMs?: number | null;
+  aiFocusX?: number | null;
+  aiFocusY?: number | null;
+  combinedScore?: number | null;
 };
 
 export type HistoryEntry = {
@@ -37,6 +46,11 @@ export type HistoryEntry = {
   createdAt: string;
   errorMessage: string | null;
   notices: string[];
+  aiStatus?: string;
+  aiError?: string | null;
+  aiModel?: string | null;
+  aiWindows?: number;
+  aiMessage?: string | null;
   candidates: Candidate[];
 };
 
@@ -72,6 +86,9 @@ export type StudioClip = {
   endMs: number;
   detectedStartMs: number;
   detectedEndMs: number;
+  aiFocusX?: number | null;
+  aiFocusY?: number | null;
+  aiEventType?: string | null;
 };
 
 export type ExportRecord = {
@@ -117,4 +134,63 @@ export type ExportEvent = {
 export type StartExportResult = {
   batchId: string;
   exports: ExportRecord[];
+};
+
+export type AiSettings = {
+  enabled: boolean;
+  model: string;
+  maxWindows: number;
+  consentAccepted: boolean;
+  hasKey: boolean;
+  status: "disabled" | "missing_key" | "ready" | "running" | string;
+  supportedModels: string[];
+  privacyNote: string;
+};
+
+export type AiConnectionResult = {
+  ok: boolean;
+  model: string;
+  message: string;
+  latencyMs: number | null;
+};
+
+export type AiAssessmentItem = {
+  candidateId: number | null;
+  windowStartMs: number;
+  windowEndMs: number;
+  origin: string;
+  localScore: number;
+  isHighlight: boolean;
+  eventType: string;
+  interestScore: number;
+  peakMs: number | null;
+  reason: string;
+  aiTitle: string | null;
+  focusX: number | null;
+  focusY: number | null;
+  focusConfidence: number;
+  combinedScore: number;
+  combinedLabel: string;
+  model: string;
+  segmentOffsetSeconds: number | null;
+  evidence: string;
+  rejected?: boolean;
+  code?: string;
+  message?: string;
+};
+
+export type AiEvent = {
+  type: string;
+  jobId?: string;
+  total?: number;
+  assessed?: number;
+  failed?: number;
+  rejected?: number;
+  model?: string;
+  message?: string | null;
+  rateLimited?: boolean;
+  cancelled?: boolean;
+  stage?: string;
+  progress?: number;
+  item?: AiAssessmentItem;
 };

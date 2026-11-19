@@ -19,26 +19,28 @@ const MAX_CLIP_MS = 180_000;
 const PEAK_PADDING_MS = 300;
 
 const ASPECT_OPTIONS: Array<{ value: FramingAspect; label: string }> = [
-  { value: "vertical", label: "Vertical" },
-  { value: "square", label: "Square" },
+  { value: "vertical", label: "Reels / Shorts" },
+  { value: "square", label: "Square 1:1" },
   { value: "original", label: "Original" },
 ];
 
+// Fill-screen cropping is first because it is the only mode that produces a
+// genuine full-frame Reels/Shorts composition from landscape gameplay.
 const MODE_OPTIONS: Array<{ value: FramingMode; label: string; hint: string }> = [
-  { value: "full_frame", label: "Full frame", hint: "Keep the whole frame over a blurred cover" },
-  { value: "crop", label: "Crop", hint: "Fill the frame without stretching" },
-  { value: "original", label: "Original", hint: "Preserve the source shape with a dark background" },
+  { value: "crop", label: "Fill screen", hint: "Crops the sides so gameplay fills the whole 9:16 canvas" },
+  { value: "full_frame", label: "Preserve full", hint: "Keeps every edge of the gameplay over a blurred cover" },
+  { value: "original", label: "Original", hint: "Keeps the source shape inside a dark background" },
 ];
 
 const ASPECT_LABELS: Record<string, string> = {
-  vertical: "Vertical 1080 × 1920",
-  square: "Square 1080 × 1080",
+  vertical: "Reels / Shorts · 1080 × 1920",
+  square: "Square · 1080 × 1080",
   original: "Original resolution",
 };
 
 const MODE_LABELS: Record<string, string> = {
-  full_frame: "Full frame",
-  crop: "Crop",
+  crop: "Fill screen",
+  full_frame: "Preserve full gameplay",
   original: "Original",
 };
 
@@ -123,7 +125,7 @@ export default function Studio({
   const [clips, setClips] = useState<StudioClip[]>(initialClips);
   const [activeIndex, setActiveIndex] = useState(0);
   const [aspect, setAspect] = useState<FramingAspect>("vertical");
-  const [mode, setMode] = useState<FramingMode>("full_frame");
+  const [mode, setMode] = useState<FramingMode>("crop");
   const [cropX, setCropX] = useState(0.5);
   const [cropY, setCropY] = useState(0.5);
   const [crf, setCrf] = useState(21);
@@ -145,6 +147,7 @@ export default function Studio({
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const backgroundRef = useRef<HTMLVideoElement | null>(null);
+  const cropMapRef = useRef<HTMLVideoElement | null>(null);
   const initialPositionRef = useRef(initialPositionMs ?? initialClips[0]?.startMs ?? 0);
   const activeBatchRef = useRef<string | null>(null);
 
@@ -437,7 +440,13 @@ export default function Studio({
 
   function chooseAspect(next: FramingAspect) {
     setAspect(next);
-    if (next === "original") setMode("original");
+    if (next === "original") {
+      setMode("original");
+      return;
+    }
+    // Returning from Original must land on a real short-form composition,
+    // not on a leftover letterbox.
+    if (mode === "original") setMode("crop");
   }
 
   async function chooseFolder() {
@@ -555,6 +564,18 @@ export default function Studio({
     }
   }
 
+  useEffect(() => {
+    const map = cropMapRef.current;
+    if (!map) return;
+    const target = playheadMs / 1_000;
+    if (Math.abs(map.currentTime - target) > 1) {
+      map.currentTime = target;
+    }
+  }, [playheadMs]);
+
+  const cropKeptPercent = Math.round(
+    ((layout.crop.width * layout.crop.height) / Math.max(1, sourceWidth * sourceHeight)) * 100,
+  );
   const foregroundStyle = {
     left: `${(layout.foreground.x / layout.canvasWidth) * 100}%`,
     top: `${(layout.foreground.y / layout.canvasHeight) * 100}%`,
@@ -668,6 +689,7 @@ export default function Studio({
               {previewError && <span className="preview-warning">{previewError}</span>}
               <span className="preview-badge">
                 {ASPECT_LABELS[aspect]} · {MODE_LABELS[effectiveMode]}
+                {aspect !== "original" && effectiveMode !== "crop" ? " (letterboxed)" : ""}
               </span>
               {captionText && (
                 <p className="preview-caption" style={captionStyle}>{captionText}</p>
@@ -743,16 +765,39 @@ export default function Studio({
 
           <div className={`control-block ${cropAvailable ? "" : "is-muted"}`}>
             <div className="control-label">
-              <span>Crop position</span>
-              <button
-                className="text-button"
-                type="button"
-                disabled={!cropAvailable || !!activeBatchId}
-                onClick={() => { setCropX(0.5); setCropY(0.5); }}
-              >
-                Center
-              </button>
+              <span>Framing window</span>
+              <div className="framing-shortcuts">
+                <button className="text-button" type="button" disabled={!cropAvailable || !!activeBatchId} onClick={() => setCropX(0)}>Left</button>
+                <button className="text-button" type="button" disabled={!cropAvailable || !!activeBatchId} onClick={() => { setCropX(0.5); setCropY(0.5); }}>Center</button>
+                <button className="text-button" type="button" disabled={!cropAvailable || !!activeBatchId} onClick={() => setCropX(1)}>Right</button>
+              </div>
             </div>
+            {cropAvailable && (
+              <div className="crop-map">
+                <video
+                  ref={cropMapRef}
+                  className="crop-map-video"
+                  src={sourceUrl}
+                  muted
+                  playsInline
+                  preload="metadata"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                />
+                <span
+                  className="crop-map-window"
+                  style={{
+                    left: `${(layout.crop.x / sourceWidth) * 100}%`,
+                    top: `${(layout.crop.y / sourceHeight) * 100}%`,
+                    width: `${(layout.crop.width / sourceWidth) * 100}%`,
+                    height: `${(layout.crop.height / sourceHeight) * 100}%`,
+                  }}
+                />
+                <span className="crop-map-label">
+                  KEPT {layout.crop.width}×{layout.crop.height} · {cropKeptPercent}% OF FRAME
+                </span>
+              </div>
+            )}
             <label className="slider-label"><span>Horizontal</span><output>{Math.round(cropX * 100)}%</output></label>
             <input
               type="range" min={0} max={1} step={0.01} value={cropX}
@@ -768,8 +813,28 @@ export default function Studio({
               aria-label="Vertical crop position"
             />
             <p className="control-hint">
-              {cropAvailable ? "Move the crop window across the source. The image is never stretched." : "Choose Crop to adjust the framing window."}
+              {cropAvailable
+                ? "The dimmed area is cropped away; the bright window is what the exported 9:16 video shows. Nothing is stretched."
+                : "Choose Fill screen to move the framing window. Preserve full keeps the entire gameplay frame."}
             </p>
+            {activeClip.aiFocusX != null && activeClip.aiFocusY != null && (
+              <div className="ai-focus">
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={!!activeBatchId}
+                  onClick={() => {
+                    setAspect("vertical");
+                    setMode("crop");
+                    setCropX(clamp(activeClip.aiFocusX ?? 0.5, 0, 1));
+                    setCropY(clamp(activeClip.aiFocusY ?? 0.5, 0, 1));
+                  }}
+                >
+                  Use AI framing · {Math.round((activeClip.aiFocusX ?? 0.5) * 100)}% / {Math.round((activeClip.aiFocusY ?? 0.5) * 100)}%
+                </button>
+                <span className="control-hint">Gemini suggested this focus point. It is a suggestion, not tracking — adjust it freely.</span>
+              </div>
+            )}
           </div>
 
           <div className="control-block">

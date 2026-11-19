@@ -10,10 +10,17 @@ from pathlib import Path
 from luna_worker import export, framing, media
 from luna_worker.protocol import log
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def send(event_type: str, **data) -> None:
     message = {"type": event_type, **data}
-    sys.stdout.write(json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n")
+    # ASCII escapes keep the protocol encoding-independent on Windows.
+    sys.stdout.write(json.dumps(message, separators=(",", ":"), ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -55,7 +62,9 @@ def main() -> int:
     threading.Thread(target=read_controls, daemon=True).start()
 
     aspect = str(request.get("aspect", "vertical"))
-    mode = str(request.get("mode", "full_frame"))
+    # Fill-screen cropping is the default presentation for short-form presets;
+    # the blurred cover is only used when the caller explicitly asks for it.
+    mode = str(request.get("mode", "crop"))
     crop_x = float(request.get("cropX", 0.5))
     crop_y = float(request.get("cropY", 0.5))
     crf = int(request.get("crf", 21))
