@@ -217,6 +217,7 @@ export default function App() {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [studio, setStudio] = useState<StudioSession | null>(null);
   const [studioBusy, setStudioBusy] = useState(false);
+  const [studioExporting, setStudioExporting] = useState(false);
   const [ai, setAi] = useState<AiSettings | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -490,6 +491,10 @@ export default function App() {
     setAiRun({ jobId: aiTargetId, status: "running", message: "Starting cloud analysis…", assessed: 0, total: 0 });
     try {
       await invoke("start_ai_analysis", { jobId: aiTargetId });
+      // The AI merge is persisted in the database, so display the same job from
+      // history; the live analysis state only carries local worker events.
+      setSelectedHistoryId(aiTargetId);
+      await refreshHistory();
     } catch (reason) {
       const message = friendlyError(reason);
       setAiError(message);
@@ -585,7 +590,7 @@ export default function App() {
           <span className="format-note">MP4 · MKV · WEBM</span>
         </div>
         {!media ? (
-          <button className="dropzone" type="button" onClick={chooseMedia} disabled={busy || active}>
+          <button className="dropzone" type="button" onClick={chooseMedia} disabled={busy || active || studioExporting}>
             <span className="upload-icon" aria-hidden="true">↑</span>
             <span className="drop-title">{busy ? "Checking your video…" : "Choose a video to get started"}</span>
             <span className="drop-subtitle">Select an MP4, MKV, or WebM recording from your computer.</span>
@@ -601,7 +606,7 @@ export default function App() {
               {media.frameRate && <span>{formatFrameRate(media.frameRate)}</span>}
               <span className={media.audioTracks ? "audio-ok" : "audio-missing"}>{media.audioTracks ? `Audio included` : "No audio track"}</span>
             </div>
-            <button type="button" className="text-button change-button" disabled={active} onClick={() => { setMedia(null); setStudio(null); setError(null); }}>Choose another</button>
+            <button type="button" className="text-button change-button" disabled={active || studioExporting} onClick={() => { setMedia(null); setStudio(null); setError(null); }}>Choose another</button>
           </div>
         )}
         {media && !media.audioTracks && <p className="inline-note">This recording has no audio. Luna can still look for visual changes.</p>}
@@ -620,7 +625,7 @@ export default function App() {
         </div>
         <div className={`progress-track ${active ? "progress-active" : ""}`} role="progressbar" aria-label="Analysis progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={analysis.progress}><span style={{ width: `${analysis.progress}%` }} /></div>
         <div className="analysis-actions">
-          <button className="start-button" type="button" onClick={startAnalysis} disabled={!media || active || busy}>
+          <button className="start-button" type="button" onClick={startAnalysis} disabled={!media || active || busy || studioExporting}>
             {active ? "Finding your moments…" : "Find my highlights"}<span aria-hidden="true">{active ? "···" : "↗"}</span>
           </button>
           {active && analysis.id && <button className="cancel-button" type="button" onClick={cancelAnalysis}>Stop</button>}
@@ -645,8 +650,14 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={!!ai?.enabled}
-                disabled={aiBusy || !ai}
-                onChange={(event) => void saveAiSettings({ enabled: event.target.checked })}
+                disabled={aiBusy || !ai || !ai.consentAccepted}
+                onChange={(event) =>
+                  void saveAiSettings(
+                    event.target.checked
+                      ? { enabled: true }
+                      : { enabled: false, consentAccepted: false },
+                  )
+                }
               />
               <span>
                 <strong>Send candidate segments to Gemini</strong>
@@ -654,7 +665,7 @@ export default function App() {
               </span>
             </label>
 
-            {ai?.enabled && !ai.consentAccepted && (
+            {ai && !ai.consentAccepted && (
               <div className="ai-consent">
                 <p>Before using cloud analysis, confirm you understand what leaves this device:</p>
                 <ul>
@@ -662,13 +673,13 @@ export default function App() {
                   <li>Google processes them with the Gemini API; on the free tier submitted content may be used to improve Google’s products.</li>
                   <li>Uploaded segments are deleted from Google after each request where the API allows it.</li>
                 </ul>
-                <button className="ghost-button" type="button" disabled={aiBusy} onClick={() => void saveAiSettings({ consentAccepted: true })}>
-                  I understand — enable cloud processing
+                <button className="ghost-button" type="button" disabled={aiBusy} onClick={() => void saveAiSettings({ consentAccepted: true, enabled: true })}>
+                  I understand — enable Cloud AI
                 </button>
               </div>
             )}
             {ai?.consentAccepted && (
-              <p className="ai-hint">Cloud processing consent recorded. You can withdraw it by turning this off.</p>
+              <p className="ai-hint">Cloud processing consent recorded. Turning the toggle off also clears this consent.</p>
             )}
 
             <div className="ai-field">
@@ -752,7 +763,7 @@ export default function App() {
                 <button
                   className="ghost-button"
                   type="button"
-                  disabled={studioBusy || active}
+                  disabled={studioBusy || active || studioExporting}
                   onClick={() => void openStudio(selectedCandidates, selectedCandidates[0].peakMs)}
                 >
                   Shape {selectedCandidates.length} {selectedCandidates.length === 1 ? "short" : "shorts"}
@@ -802,7 +813,7 @@ export default function App() {
                     <button
                       className="ghost-button"
                       type="button"
-                      disabled={studioBusy || active}
+                      disabled={studioBusy || active || studioExporting}
                       onClick={() => void openStudio([candidate], candidate.peakMs)}
                     >
                       Create short
@@ -842,6 +853,7 @@ export default function App() {
             clips={studio.clips}
             initialPositionMs={studio.initialPositionMs}
             onClose={() => setStudio(null)}
+            onExportingChange={setStudioExporting}
           />
         </div>
       )}
@@ -855,7 +867,7 @@ export default function App() {
           <div className="history-list">
             {history.map((item) => (
               <button className={`history-item ${selectedHistoryId === item.id ? "selected" : ""}`} type="button" key={item.id}
-                disabled={active} onClick={() => { setSelectedHistoryId(item.id); setMedia(null); setStudio(null); }}>
+                disabled={active || studioExporting} onClick={() => { setSelectedHistoryId(item.id); setMedia(null); setStudio(null); }}>
                 <span className={`history-status status-${item.status}`}>{item.status === "completed" ? "Ready" : item.status === "failed" ? "Needs attention" : item.status}</span>
                 <span className="history-name">{item.sourceName}</span>
                 <span className="history-detail">{item.candidates.length} moments · {new Date(item.createdAt).toLocaleDateString()}</span>

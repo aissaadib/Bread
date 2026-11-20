@@ -132,6 +132,7 @@ pub fn save_settings(state: &Arc<AppState>, request: SaveAiSettings) -> Result<A
     let model = request.model.trim();
     if model.is_empty() || model.len() > 64
         || !model.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_'))
+        || !SUPPORTED_MODELS.contains(&model)
     {
         return Err("Choose one of the supported Gemini model names.".into());
     }

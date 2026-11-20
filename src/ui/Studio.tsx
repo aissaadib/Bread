@@ -121,6 +121,7 @@ export default function Studio({
   clips: initialClips,
   initialPositionMs,
   onClose,
+  onExportingChange,
 }: StudioProps) {
   const [clips, setClips] = useState<StudioClip[]>(initialClips);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -330,11 +331,16 @@ export default function Studio({
   }, [effectiveMode]);
 
   useEffect(() => {
+    onExportingChange?.(Boolean(activeBatchId));
+  }, [activeBatchId, onExportingChange]);
+
+  useEffect(() => {
     return () => {
+      onExportingChange?.(false);
       videoRef.current?.pause();
       backgroundRef.current?.pause();
     };
-  }, []);
+  }, [onExportingChange]);
 
   function updateActiveClip(patch: Partial<StudioClip>) {
     setClips((current) =>

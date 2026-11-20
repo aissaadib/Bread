@@ -134,21 +134,22 @@ def _progress(index: int, total: int, fraction: float) -> int:
 
 def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
                   window: dict[str, Any], temporary: Path, options: dict[str, Any],
-                  cancelled: threading.Event, index: int, total: int) -> dict[str, Any]:
+                  cancelled: threading.Event, index: int, total: int,
+                  job_id: str) -> dict[str, Any]:
     """One request: cut -> upload -> ask -> validate -> delete remote -> clean up."""
     if cancelled.is_set():
         raise Cancelled()
     segment = temporary / f"window-{index:02d}.mp4"
     remote_name = ""
     try:
-        send("ai_progress", stage="extracting", progress=_progress(index, total, 0.0),
-             window=index, total=total)
+        send("ai_progress", jobId=job_id, stage="extracting",
+             progress=_progress(index, total, 0.0), window=index, total=total)
         extract_segment(source, info, window, segment, int(options["segment_max_width"]))
         if cancelled.is_set():
             raise Cancelled()
 
-        send("ai_progress", stage="uploading", progress=_progress(index, total, 0.35),
-             window=index, total=total)
+        send("ai_progress", jobId=job_id, stage="uploading",
+             progress=_progress(index, total, 0.35), window=index, total=total)
         file_info = client.upload_file(str(segment), "video/mp4", f"luna-window-{index:02d}.mp4")
         remote_name = file_info.get("name", "")
         file_info = client.wait_until_active(file_info)
@@ -159,8 +160,8 @@ def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
 
         if cancelled.is_set():
             raise Cancelled()
-        send("ai_progress", stage="assessing", progress=_progress(index, total, 0.65),
-             window=index, total=total)
+        send("ai_progress", jobId=job_id, stage="assessing",
+             progress=_progress(index, total, 0.65), window=index, total=total)
         raw = client.assess(file_uri, "video/mp4", ai.build_prompt(window))
         assessment = ai.parse_assessment(raw, window)
         return {
@@ -238,6 +239,7 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
     total = len(windows)
     send("ai_started", jobId=job_id, total=total, model=client.model)
     assessed = failed = rejected = 0
+    last_error = ""
 
     with tempfile.TemporaryDirectory(prefix="luna-ai-") as temporary_name:
         temporary = Path(temporary_name)
@@ -246,7 +248,7 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
                 if cancelled.is_set():
                     raise Cancelled()
                 item = assess_window(client, source, info, window, temporary, options,
-                                     cancelled, index, total)
+                                     cancelled, index, total, job_id)
                 assessed += 1
                 send("ai_item", jobId=job_id, item=item)
             except Cancelled:
@@ -260,18 +262,24 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
                 return 1
             except ai.AssessmentError as error:
                 rejected += 1
+                last_error = str(error)
                 _reject(job_id, window, error.code, str(error))
             except GeminiError as error:
                 failed += 1
+                last_error = str(error)
                 _reject(job_id, window, error.code, str(error))
             except Exception as error:  # An optional step must never crash the app.
                 log(f"Unexpected cloud analysis failure: {traceback.format_exc()}")
                 failed += 1
+                last_error = str(error)
                 _reject(job_id, window, getattr(error, "code", "unexpected_error"),
                         str(error))
 
+    summary = "Gemini returned no usable assessments."
+    if last_error:
+        summary = f"Gemini could not review the selected segment: {last_error}"
     _finish(job_id, client.model, total, assessed, failed, rejected,
-            message=None if assessed else "Gemini returned no usable assessments.")
+            message=None if assessed else summary)
     return 0
 
 
@@ -292,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         except GeminiError as error:
             send("test", ok=False, code=error.code, message=str(error))
             return 1
-        send("test", ok=True, **result)
+        send("test", **result)
         return 0
 
     if not args.request:

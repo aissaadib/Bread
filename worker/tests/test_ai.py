@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -340,6 +341,42 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(process.returncode, 1)
         self.assertEqual(events[0]["code"], "bad_request")
 
+    def test_test_connection_mode_emits_the_client_result_once(self) -> None:
+        # Regression: add_missing_argument() once sent `ok=True` twice, so every
+        # real "Test connection" crashed inside the worker and looked like a
+        # network timeout to the user.
+        events: list[dict] = []
+        original_client = ai_worker.GeminiClient
+        original_send = ai_worker.send
+        original_stdin = sys.stdin
+        original_watch = ai_worker.watch_for_cancel
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.model = "gemini-3.8-flash"
+
+            def test_connection(self) -> dict:
+                return {"ok": True, "model": self.model,
+                        "displayName": "Gemini 3.8 Flash", "latencyMs": 42}
+
+        try:
+            ai_worker.GeminiClient = FakeClient
+            ai_worker.send = lambda event_type, **data: events.append(
+                {"type": event_type, **data})
+            ai_worker.watch_for_cancel = lambda *_args: None
+            sys.stdin = io.StringIO('{"apiKey": "k"}\n')
+            code = ai_worker.main(["--test-connection"])
+        finally:
+            ai_worker.GeminiClient = original_client
+            ai_worker.send = original_send
+            ai_worker.watch_for_cancel = original_watch
+            sys.stdin = original_stdin
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["ok"])
+        self.assertEqual(events[0]["latencyMs"], 42)
+
 
 class WorkerTests(unittest.TestCase):
     @classmethod
@@ -406,6 +443,11 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(client.deleted, ["files/1"])
         self.assertTrue(any(event["type"] == "ai_complete" for event in events))
         self.assertIn("gaming highlight", client.prompts[0])
+        # The Rust host drops (and fails) the run on any event without its job
+        # id; progress events once omitted it, so real runs died immediately.
+        self.assertTrue(events)
+        for event in events:
+            self.assertEqual(event.get("jobId"), "job-ai-test", event)
 
     def test_upload_failure_leaves_no_remote_or_temporary_file(self) -> None:
         client = FakeClient(upload_error=GeminiError("upload broke", code="upload_failed"))
@@ -422,6 +464,8 @@ class WorkerTests(unittest.TestCase):
         _, events = self.run_worker(self.request(), client=client)
         self.assertEqual(client.deleted, ["files/1"])
         self.assertTrue(next(e for e in events if e["type"] == "ai_item")["item"]["rejected"])
+        complete = next(e for e in events if e["type"] == "ai_complete")
+        self.assertIn("model failed", complete["message"])
 
     def test_invalid_json_is_recorded_as_a_rejection(self) -> None:
         client = FakeClient(replies=["this is not json"])
