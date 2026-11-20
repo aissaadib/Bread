@@ -138,7 +138,7 @@ impl Database {
             version = 4;
         }
         if version > 4 {
-            return Err(format!("Database version {version} is newer than this Luna build."));
+            return Err(format!("Database version {version} is newer than this Bread build."));
         }
         connection.execute(
             "UPDATE jobs SET status='failed', stage='interrupted', error_code='app_closed', error_message='The previous analysis stopped before it finished.', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('queued','running','cancelling')",

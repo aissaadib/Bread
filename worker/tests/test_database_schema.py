@@ -11,7 +11,7 @@ CLIP_SCHEMA = ROOT / "src-tauri" / "migrations" / "002_clip_exports.sql"
 
 class DatabaseSchemaTests(unittest.TestCase):
     def test_migration_creates_versioned_persistent_tables(self) -> None:
-        database_path = ROOT / ".test-output" / "luna-test.sqlite3"
+        database_path = ROOT / ".test-output" / "bread-test.sqlite3"
         database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database_path)
         try:

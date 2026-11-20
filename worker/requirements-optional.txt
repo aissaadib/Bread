@@ -1,4 +1,4 @@
-# Install only when enabling local speech signals. No models are fetched by Luna.
+# Install only when enabling local speech signals. No models are fetched by Bread.
 silero-vad>=6.0,<7
 faster-whisper>=1.1,<2
 # av 19.x currently fails inside Faster-Whisper with metadata_errors on this setup.

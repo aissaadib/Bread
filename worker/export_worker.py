@@ -7,8 +7,8 @@ import threading
 import traceback
 from pathlib import Path
 
-from luna_worker import export, framing, media
-from luna_worker.protocol import log
+from bread_worker import export, framing, media
+from bread_worker.protocol import log
 
 for _stream in (sys.stdout, sys.stderr):
     try:

@@ -566,7 +566,7 @@ export default function App() {
   return (
     <main className="shell">
       <header className="topbar">
-        <a className="brand" href="#home" aria-label="Luna home"><span className="brand-mark">L</span><span className="brand-copy"><strong>LUNA</strong><small>STREAM CLIP FINDER</small></span></a>
+        <a className="brand" href="#home" aria-label="Bread home"><span className="brand-mark">B</span><span className="brand-copy"><strong>BREAD</strong><small>STREAM CLIP FINDER</small></span></a>
         <span className="local-badge"><i /> YOUR VIDEOS STAY ON THIS DEVICE</span>
       </header>
 
@@ -574,12 +574,12 @@ export default function App() {
         <div className="intro-copy">
           <p className="eyebrow">MADE FOR YOUR STREAM RECORDINGS</p>
           <h1>Find the moments<br />worth sharing.</h1>
-          <p className="lede">Choose a recording and Luna will find standout moments, then shape any one of them into a vertical short.</p>
+          <p className="lede">Choose a recording and Bread will find standout moments, then shape any one of them into a vertical short.</p>
         </div>
-        <aside className="how-card" aria-label="How Luna works">
+        <aside className="how-card" aria-label="How Bread works">
           <p className="eyebrow">THREE SIMPLE STEPS</p>
           <div className="how-step"><span>1</span><div><strong>Choose</strong><small>Pick a video from your computer</small></div></div>
-          <div className="how-step"><span>2</span><div><strong>Find</strong><small>Luna scans for standout moments</small></div></div>
+          <div className="how-step"><span>2</span><div><strong>Find</strong><small>Bread scans for standout moments</small></div></div>
           <div className="how-step"><span>3</span><div><strong>Shape</strong><small>Frame and export a short-form MP4</small></div></div>
         </aside>
       </section>
@@ -595,7 +595,7 @@ export default function App() {
             <span className="drop-title">{busy ? "Checking your video…" : "Choose a video to get started"}</span>
             <span className="drop-subtitle">Select an MP4, MKV, or WebM recording from your computer.</span>
             <span className="select-button">{busy ? "PLEASE WAIT" : "CHOOSE VIDEO"}<span aria-hidden="true">↗</span></span>
-            <span className="privacy-note"><i /> Your original video stays where it is. Luna works locally.</span>
+            <span className="privacy-note"><i /> Your original video stays where it is. Bread works locally.</span>
           </button>
         ) : (
           <div className="media-summary">
@@ -609,7 +609,7 @@ export default function App() {
             <button type="button" className="text-button change-button" disabled={active || studioExporting} onClick={() => { setMedia(null); setStudio(null); setError(null); }}>Choose another</button>
           </div>
         )}
-        {media && !media.audioTracks && <p className="inline-note">This recording has no audio. Luna can still look for visual changes.</p>}
+        {media && !media.audioTracks && <p className="inline-note">This recording has no audio. Bread can still look for visual changes.</p>}
         {error && <p className="error-message" role="alert">{error}</p>}
       </section>
 
@@ -642,7 +642,7 @@ export default function App() {
           </div>
           <span className={`ai-status status-${aiStatus}`}>{AI_STATUS_LABELS[aiStatus] ?? aiStatus}</span>
         </div>
-        <p className="ai-privacy">{ai?.privacyNote ?? "Cloud analysis is optional. Luna's local analysis always works without it."}</p>
+        <p className="ai-privacy">{ai?.privacyNote ?? "Cloud analysis is optional. Bread's local analysis always works without it."}</p>
 
         <div className="ai-grid">
           <div className="ai-block">
@@ -661,7 +661,7 @@ export default function App() {
               />
               <span>
                 <strong>Send candidate segments to Gemini</strong>
-                <small>Off by default. Only the short windows Luna selects are uploaded.</small>
+                <small>Off by default. Only the short windows Bread selects are uploaded.</small>
               </span>
             </label>
 
@@ -712,7 +712,7 @@ export default function App() {
               <span>Your Gemini API key</span>
               <span className={`status-chip ${ai?.hasKey ? "is-ready" : "is-empty"}`}>{ai?.hasKey ? "STORED SECURELY" : "NO KEY"}</span>
             </div>
-            <p className="ai-hint">Where does the key go? Windows Credential Manager, read only by Luna’s native side. It is never written to the project, the database, logs or the page.</p>
+            <p className="ai-hint">Where does the key go? Windows Credential Manager, read only by Bread’s native side. It is never written to the project, the database, logs or the page.</p>
             <div className="ai-key-row">
               <input
                 ref={keyInputRef}
@@ -879,7 +879,7 @@ export default function App() {
         )}
       </section>
 
-      <footer><span><i /> YOUR FILES STAY ON YOUR DEVICE</span><span>LUNA · STREAM CLIP FINDER</span></footer>
+      <footer><span><i /> YOUR FILES STAY ON YOUR DEVICE</span><span>BREAD · STREAM CLIP FINDER</span></footer>
     </main>
   );
 }

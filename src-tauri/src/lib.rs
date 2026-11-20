@@ -202,7 +202,7 @@ fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>, path: String)
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let message = format!("Could not start Python. Install Python 3.11 or newer or set LUNA_PYTHON to its executable: {error}");
+            let message = format!("Could not start Python. Install Python 3.11 or newer or set BREAD_PYTHON to its executable: {error}");
             let _ = state.database.lock().map(|mut db| db.set_job_failed(&job_id, "python_missing", &message));
             return Err(message);
         }
@@ -342,12 +342,12 @@ pub(crate) fn resolve_ai_worker(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn safe_folder_name(media_path: &str) -> String {
-    let stem = Path::new(media_path).file_stem().and_then(|name| name.to_str()).unwrap_or("Luna clips");
+    let stem = Path::new(media_path).file_stem().and_then(|name| name.to_str()).unwrap_or("Bread clips");
     let safe_name: String = stem.chars()
         .map(|character| if character.is_control() || "<>:\"/\\|?*".contains(character) { '_' } else { character })
         .collect();
     let safe_name = safe_name.trim_matches([' ', '.']);
-    let safe_name = if safe_name.is_empty() { "Luna clips" } else { safe_name };
+    let safe_name = if safe_name.is_empty() { "Bread clips" } else { safe_name };
     let reserved = safe_name.split('.').next().unwrap_or("").to_ascii_uppercase();
     if matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9") {
         format!("_{safe_name}")
@@ -367,7 +367,7 @@ fn clip_output_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String>
 fn short_export_dir(app: &AppHandle, media_path: &str) -> Result<PathBuf, String> {
     let downloads = app.path().download_dir()
         .map_err(|error| format!("Could not find the Downloads folder: {error}"))?;
-    let folder = downloads.join("Luna Shorts").join(safe_folder_name(media_path));
+    let folder = downloads.join("Bread Shorts").join(safe_folder_name(media_path));
     fs::create_dir_all(&folder)
         .map_err(|error| format!("Could not create the short-form export folder: {error}"))?;
     Ok(folder)
@@ -379,7 +379,7 @@ fn default_export_dir(app: AppHandle, source_path: String) -> Result<String, Str
 }
 
 pub(crate) fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
-    let explicit = std::env::var_os("LUNA_PYTHON");
+    let explicit = std::env::var_os("BREAD_PYTHON");
     let mut candidates: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
     if let Some(path) = explicit {
         candidates.push((PathBuf::from(path), Vec::new()));
@@ -421,7 +421,7 @@ pub(crate) fn resolve_python() -> Result<(PathBuf, Vec<std::ffi::OsString>), Str
             return Ok((executable, args));
         }
     }
-    Err("Python 3.11 or newer was not found. Install Python or set LUNA_PYTHON to its executable.".into())
+    Err("Python 3.11 or newer was not found. Install Python or set BREAD_PYTHON to its executable.".into())
 }
 
 pub use logic::{new_job_id, worker_idle_timeout};
@@ -517,12 +517,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data_dir = match std::env::var_os("LUNA_DATA_DIR") {
+            let data_dir = match std::env::var_os("BREAD_DATA_DIR") {
                 Some(path) => PathBuf::from(path),
                 None => app.path().app_data_dir()?,
             };
             fs::create_dir_all(&data_dir)?;
-            let data_path = data_dir.join("luna.sqlite3");
+            let data_path = data_dir.join("bread.sqlite3");
             let database = Database::open(&data_path).map_err(std::io::Error::other)?;
             app.manage(Arc::new(AppState {
                 database: Mutex::new(database),
@@ -541,5 +541,5 @@ pub fn run() {
             test_ai_connection, start_ai_analysis, cancel_ai_analysis,
         ])
         .run(tauri::generate_context!())
-        .expect("Luna desktop runtime failed");
+        .expect("Bread desktop runtime failed");
 }

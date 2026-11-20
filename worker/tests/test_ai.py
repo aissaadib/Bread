@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "worker"))
 
 import ai_worker
-from luna_worker import ai, media
-from luna_worker.gemini import (
+from bread_worker import ai, media
+from bread_worker.gemini import (
     GeminiClient,
     GeminiError,
     MissingKeyError,

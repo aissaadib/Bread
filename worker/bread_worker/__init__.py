@@ -1,4 +1,4 @@
-"""Local media analysis components for Luna."""
+"""Local media analysis components for Bread."""
 
 from pathlib import Path
 import json

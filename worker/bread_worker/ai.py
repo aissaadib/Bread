@@ -6,7 +6,7 @@ prompt construction, strict validation of the returned JSON, and fusion of the
 semantic score with the existing local evidence.
 
 The HTTP transport lives in ``gemini.py`` and orchestration in ``ai_worker.py``.
-Luna stays fully functional when this layer never runs.
+Bread stays fully functional when this layer never runs.
 """
 
 from __future__ import annotations

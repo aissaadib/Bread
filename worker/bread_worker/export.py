@@ -111,7 +111,7 @@ def render_clip(source: str, info: dict, output_dir: str, title: str, number: in
     if cancelled.is_set():
         raise ExportCancelled("Export cancelled.")
 
-    with tempfile.TemporaryDirectory(prefix="luna-captions-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="bread-captions-") as temporary:
         temporary_path = Path(temporary)
         captions_filename = None
         if captions_enabled:

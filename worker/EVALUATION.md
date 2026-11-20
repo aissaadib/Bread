@@ -38,7 +38,7 @@ The end is +0.733 s beyond the manual interval because the candidate is clamped 
 
 ## Silent-audio behavior
 
-The AAC track in `1026.mp4` is digitally silent. Luna reported:
+The AAC track in `1026.mp4` is digitally silent. Bread reported:
 
 - “The audio track is effectively silent; audio and speech signals were skipped.”
 - “Transcription was skipped because the audio track is effectively silent.”
@@ -109,7 +109,7 @@ cargo test --manifest-path src-tauri/logic-tests/Cargo.toml
 Desktop check:
 
 1. Build with `npm run tauri build` or `cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml`.
-2. Launch `run-luna.cmd`.
+2. Launch `run-bread.cmd`.
 3. Import the recording, confirm the FPS label shows a single suffix (for example `30 fps`), and select “Find my highlights”.
 4. Record the returned start, peak, end, score, signals, notices, and wall time before comparing with the manual label.
 

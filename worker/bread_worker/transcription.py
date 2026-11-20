@@ -18,11 +18,11 @@ def _model_roots() -> list[Path]:
 
     Packaged builds place the worker under a different prefix than the source
     checkout, so search both the current working directory and the worker's
-    real location, walking up to the filesystem root. `LUNA_MODELS_DIR` points
+    real location, walking up to the filesystem root. `BREAD_MODELS_DIR` points
     directly at a models folder for installed copies.
     """
     roots: list[Path] = []
-    explicit = os.environ.get("LUNA_MODELS_DIR", "").strip()
+    explicit = os.environ.get("BREAD_MODELS_DIR", "").strip()
     if explicit:
         roots.append(Path(explicit))
     for start in (Path.cwd(), Path(__file__).resolve().parent):
@@ -47,7 +47,7 @@ def _local_models() -> list[Path]:
 
 
 def _resolve_model_path() -> Path | None:
-    explicit = os.environ.get("LUNA_WHISPER_MODEL", "").strip()
+    explicit = os.environ.get("BREAD_WHISPER_MODEL", "").strip()
     if explicit:
         path = Path(explicit)
         return path if path.is_dir() else None
@@ -63,12 +63,12 @@ def available() -> bool:
 
 
 def transcribe(path: str, progress: Callable[[str], None]) -> tuple[list[dict], str | None]:
-    explicit = os.environ.get("LUNA_WHISPER_MODEL", "").strip()
+    explicit = os.environ.get("BREAD_WHISPER_MODEL", "").strip()
     model_path = _resolve_model_path()
     if model_path is None:
         if explicit:
             return [], "Transcription skipped: the configured local Whisper model directory was not found."
-        return [], "Transcription skipped: set LUNA_WHISPER_MODEL to a local Faster-Whisper model directory."
+        return [], "Transcription skipped: set BREAD_WHISPER_MODEL to a local Faster-Whisper model directory."
     try:
         from faster_whisper import WhisperModel
     except ImportError:

@@ -34,9 +34,9 @@ const AI_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const AI_MAX_RUNTIME: Duration = Duration::from_secs(45 * 60);
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
 const LOCK_UNAVAILABLE: &str = "Database lock is unavailable.";
-const PRIVACY_NOTE: &str = "Cloud AI analysis sends only the short video segments Luna \
+const PRIVACY_NOTE: &str = "Cloud AI analysis sends only the short video segments Bread \
      selects to Google's Gemini API. The free tier may use submitted content to improve \
-     Google's products. Luna's local analysis always works without this feature.";
+     Google's products. Bread's local analysis always works without this feature.";
 
 pub struct ActiveAi {
     pub job_id: String,
@@ -202,7 +202,7 @@ pub fn test_connection(app: &AppHandle, state: &Arc<AppState>) -> Result<AiConne
     let key = credentials::load_gemini_key()?
         .ok_or_else(|| "Add your own Gemini API key in Cloud AI settings first.".to_string())?;
     let mut command = worker_command(app, &["--test-connection"])?;
-    command.env("LUNA_AI_MODEL", &config.model);
+    command.env("BREAD_AI_MODEL", &config.model);
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the cloud AI worker: {error}"))?;

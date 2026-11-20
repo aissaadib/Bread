@@ -15,12 +15,12 @@ import sys
 
 sys.path.insert(0, str(ROOT / "worker"))
 
-from luna_worker.audio import _window_features
-from luna_worker.media import MediaError, inspect_media
-from luna_worker.pipeline import analyze
-from luna_worker.ranking import rank
-from luna_worker.titles import generate
-from luna_worker import transcription
+from bread_worker.audio import _window_features
+from bread_worker.media import MediaError, inspect_media
+from bread_worker.pipeline import analyze
+from bread_worker.ranking import rank
+from bread_worker.titles import generate
+from bread_worker import transcription
 
 ARTIFACTS = ROOT / ".test-output"
 
@@ -126,14 +126,14 @@ class AnalysisTests(unittest.TestCase):
     def test_pipeline_saves_named_mp4_clips(self) -> None:
         output_dir = ARTIFACTS / "clips"
         output_dir.mkdir(exist_ok=True)
-        model = os.environ.pop("LUNA_TITLE_MODEL", None)
+        model = os.environ.pop("BREAD_TITLE_MODEL", None)
         try:
             emitted: list[tuple[str, dict]] = []
             analyze(str(self.recording), threading.Event(), lambda kind, **data: emitted.append((kind, data)),
                     output_dir=str(output_dir))
         finally:
             if model is not None:
-                os.environ["LUNA_TITLE_MODEL"] = model
+                os.environ["BREAD_TITLE_MODEL"] = model
         candidates = [data["candidate"] for kind, data in emitted if kind == "candidate"]
         completed = next(data for kind, data in emitted if kind == "complete")
         self.assertTrue(candidates)
@@ -222,7 +222,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(results[0]["evidence"][0]["metadata"]["audio_tracks"], [1, 2])
 
     def test_worker_jsonl_protocol_carries_job_ids_and_terminal_result(self) -> None:
-        from luna_worker import DEFAULT_CONFIG
+        from bread_worker import DEFAULT_CONFIG
 
         process = subprocess.Popen(
             [sys.executable, str(ROOT / "worker" / "clipper_worker.py"), "--path", str(ARTIFACTS / "missing.mp4"),
@@ -244,7 +244,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(events[-1]["code"], "source_missing")
 
     def test_worker_process_completes_video_analysis_with_control_pipe_open(self) -> None:
-        from luna_worker import DEFAULT_CONFIG
+        from bread_worker import DEFAULT_CONFIG
 
         process = subprocess.Popen(
             [sys.executable, str(ROOT / "worker" / "clipper_worker.py"), "--path", str(self.recording),
@@ -266,7 +266,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreater(events[-1]["candidate_count"], 0)
 
     def test_worker_control_channel_cancels_the_requested_job(self) -> None:
-        from luna_worker import DEFAULT_CONFIG
+        from bread_worker import DEFAULT_CONFIG
 
         job_id = "cancel-protocol-test"
         process = subprocess.Popen(
@@ -288,7 +288,7 @@ class AnalysisTests(unittest.TestCase):
             model = models / "faster-whisper-base.en"
             model.mkdir(parents=True)
             (model / "model.bin").write_bytes(b"stub")
-            with mock.patch.dict(os.environ, {"LUNA_MODELS_DIR": str(models), "LUNA_WHISPER_MODEL": ""}):
+            with mock.patch.dict(os.environ, {"BREAD_MODELS_DIR": str(models), "BREAD_WHISPER_MODEL": ""}):
                 self.assertTrue(transcription.available())
                 self.assertEqual(transcription._resolve_model_path(), model)
 
@@ -303,7 +303,7 @@ class AnalysisTests(unittest.TestCase):
             previous = Path.cwd()
             os.chdir(packaged_worker)
             try:
-                with mock.patch.dict(os.environ, {"LUNA_MODELS_DIR": "", "LUNA_WHISPER_MODEL": ""}):
+                with mock.patch.dict(os.environ, {"BREAD_MODELS_DIR": "", "BREAD_WHISPER_MODEL": ""}):
                     self.assertEqual(transcription._resolve_model_path(), model)
             finally:
                 os.chdir(previous)

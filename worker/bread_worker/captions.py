@@ -133,7 +133,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Luna,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00120F0A,&H78000000,1,0,0,0,100,100,0,0,1,3,1,2,{margin_h},{margin_h},{margin_v},1
+Style: Bread,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00120F0A,&H78000000,1,0,0,0,100,100,0,0,1,3,1,2,{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -144,6 +144,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         text = "\\N".join(line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}") for line in cue.lines)
         lines.append(
-            f"Dialogue: 0,{_timestamp(cue.start)},{_timestamp(cue.end)},Luna,,0,0,0,,{text}\n"
+            f"Dialogue: 0,{_timestamp(cue.start)},{_timestamp(cue.end)},Bread,,0,0,0,,{text}\n"
         )
     destination.write_text("".join(lines), encoding="utf-8")

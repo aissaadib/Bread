@@ -16,7 +16,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "worker"))
-from luna_worker.pipeline import analyze
+from bread_worker.pipeline import analyze
 
 DURATION_SECONDS = 3 * 60 * 60
 KNOWN_EVENT_SECONDS = 90 * 60

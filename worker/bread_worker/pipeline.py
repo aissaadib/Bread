@@ -78,7 +78,7 @@ def analyze(path: str, cancelled: threading.Event, emit: Callable[..., None], co
         elif not transcript:
             notices.append("Local transcription ran but found no speech segments.")
     elif audible:
-        notices.append("Transcription is optional; no local Whisper model was found. Set LUNA_WHISPER_MODEL or place one under .models.")
+        notices.append("Transcription is optional; no local Whisper model was found. Set BREAD_WHISPER_MODEL or place one under .models.")
     elif info["has_audio"]:
         notices.append("Transcription was skipped because the audio track is effectively silent.")
 

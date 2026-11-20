@@ -169,7 +169,7 @@ pub fn retry(app: &AppHandle, state: &Arc<AppState>, export_id: &str) -> Result<
     let output_dir = match record.output_path.as_deref().and_then(|path| Path::new(path).parent()) {
         Some(path) if path.is_dir() => path.to_path_buf(),
         _ => PathBuf::from(record.source_path.as_str()).parent()
-            .map(|path| path.join("Luna Shorts"))
+            .map(|path| path.join("Bread Shorts"))
             .unwrap_or_else(|| PathBuf::from(".")),
     };
     launch(

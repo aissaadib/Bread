@@ -1,4 +1,4 @@
-"""Google Gemini Developer API client for Luna's optional cloud analysis.
+"""Google Gemini Developer API client for Bread's optional cloud analysis.
 
 Only the documented REST endpoints of the Google Gemini Developer API are used
 (https://ai.google.dev/gemini-api/docs). The API key travels in the

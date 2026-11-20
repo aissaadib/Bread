@@ -1,6 +1,6 @@
-# Luna — local stream analyzer
+# Bread — local stream analyzer
 
-Luna analyzes local gaming recordings, returns ranked timestamp suggestions, and turns any of them into a true full-screen 9:16 MP4 for YouTube Shorts, TikTok, or Instagram Reels. It accepts local MP4, MKV, and WebM files and does not download platform streams. Media stays on the device unless the user explicitly enables the optional cloud AI analysis, which sends only the short segments Luna selects to Google's Gemini API.
+Bread analyzes local gaming recordings, returns ranked timestamp suggestions, and turns any of them into a true full-screen 9:16 MP4 for YouTube Shorts, TikTok, or Instagram Reels. It accepts local MP4, MKV, and WebM files and does not download platform streams. Media stays on the device unless the user explicitly enables the optional cloud AI analysis, which sends only the short segments Bread selects to Google's Gemini API.
 
 ## Architecture
 
@@ -40,9 +40,9 @@ Selecting **Create short** on a candidate, or ticking **Add to batch** on severa
 - **Crop guidance:** horizontal and vertical sliders, Left/Center/Right shortcuts, and a source map that dims everything the crop discards while a badge reports the kept pixel size and the percentage of the source frame retained. The map and the preview share the same geometry module as the renderer, so what the studio shows is what FFmpeg encodes.
 - **Boundaries:** start and end sliders clamp the clip to 1–180 seconds, keep the detected peak inside the window, and show the detected window plus the current selection on a timeline. **Reset** returns to the detected boundaries. The clip is never silently truncated.
 - **Captions (optional):** burned in only from the saved local Faster-Whisper words/segments, grouped into at most two lines with real timestamps. The toggle is disabled when the analysis has no transcript, and a missing speech model never blocks export.
-- **Export:** single or batch (up to 50 clips), a chosen output folder (default `Downloads/Luna Shorts/<source video name>/`), CRF 14–28, live per-clip progress, cancellation, retry for failed/cancelled items, and Open/Show folder for finished files. Rendered files are written as a hidden partial and renamed on success, so a cancelled or failed export never leaves a broken MP4.
+- **Export:** single or batch (up to 50 clips), a chosen output folder (default `Downloads/Bread Shorts/<source video name>/`), CRF 14–28, live per-clip progress, cancellation, retry for failed/cancelled items, and Open/Show folder for finished files. Rendered files are written as a hidden partial and renamed on success, so a cancelled or failed export never leaves a broken MP4.
 
-The preview and the renderer share one geometry implementation, mirrored in `src/ui/framing.ts` and `worker/luna_worker/framing.py`; the TypeScript mirror is checked against the Python version across 216 preset/mode/crop/source combinations with zero mismatches.
+The preview and the renderer share one geometry implementation, mirrored in `src/ui/framing.ts` and `worker/bread_worker/framing.py`; the TypeScript mirror is checked against the Python version across 216 preset/mode/crop/source combinations with zero mismatches.
 
 Rendering runs in `worker/export_worker.py` (a second Python process, separate from analysis) and shells out to FFmpeg with libx264 `veryfast`, `-pix_fmt yuv420p`, AAC audio when the source has it, `+faststart`, and passthrough frame timing. Every job is persisted in the `clip_exports` table (migration `003_shortform_exports.sql`) with its source, candidate, original and adjusted timestamps, preset, mode, crop, caption flag, CRF, output path, and status.
 
@@ -61,24 +61,24 @@ These are local measurements, not a calibrated accuracy claim. The full procedur
 - **Real Gemini API call (v0.4):** with a user-supplied key and `gemini-3.8-flash`, the cloud worker uploaded a 22 s 720p segment cut from `1026.mp4`, received a schema-valid assessment, converted its segment-relative peak to an absolute timestamp, and deleted the uploaded file before reporting the result. The model returned `is_highlight: false`, `interest_score: 20` and the reason *"The player scores a basic aerial shot in Rocket League custom training before immediately tabbing out to the desktop."* — a semantic judgment that the moment is practice, not a match highlight, which the deterministic detector cannot express. One window took **95 s** wall time including retries; the free tier is rate-limited, which is why windows per run are capped and configurable. These are real requests, not mocks.
 - **Local vs Gemini detection (v0.4, real API):** the local detector returned **39 candidates** across 11.6 minutes of real gameplay — on speech-heavy footage it clearly over-fires, which is the motivation for the cloud layer. Its three strongest candidates scored **96, 95 and 90**, so the ranking could not tell them apart. Gemini reviewed those three windows and returned: `skilled_play` at 376 s (interest 68), `skilled_play` at 660 s (interest 58), and **not a highlight** for the 96-point local candidate at 538 s (*"disconnected moments featuring a brief defeat followed by a cut to character selection and casual combat"*). Fused ranking therefore reordered the list from `96, 95, 90` to `84, 77, 43` — the semantically weak moment drops below both real combos, and the two highlights gain generated titles ("Skilled play — The player executes a special combo…") and focus points. The run used 3 windows in **395 s** including retries (15 HTTP requests), which is why the window budget is configurable and capped. This is a single-recording observation, not a labelled precision/recall benchmark: there is no ground-truth annotation for this footage, and a different game or presenter will score differently.
 - **API key check (v0.4, real API):** `--test-connection` with the user's own key reached `models/gemini-3.8-flash` in **358 ms** and answered `ok`, using one metadata request and uploading nothing. Re-running it exposed two protocol bugs that the earlier worker-only probes could not see — progress events omitted the job id the host requires for every event, and the test event passed `ok` twice and crashed the worker so the app reported a timeout. Both are fixed, covered by worker tests, and included in the rebuilt installer.
-- **Packaged v0.4 launch:** `luna.exe` (0.4.0) started from the release build with the v0.3 database and migrated it from schema version 3 to 4 (`app_settings`, `ai_assessments`, and the new candidate/job AI columns), preserving all 12 jobs and 82 candidates. The installer `Luna_0.4.0_x64-setup.exe` is produced by `npm run tauri build`.
-- **Packaged v0.3 launch:** `luna.exe` started from the release build with the previous v0.2 database, migrated it from schema version 2 to 3 (`clip_exports` table plus `jobs.transcript_json`), and preserved all 10 jobs, 44 candidates, and completed analyses.
+- **Packaged v0.4 launch:** `bread.exe` (0.4.0) started from the release build with the v0.3 database and migrated it from schema version 3 to 4 (`app_settings`, `ai_assessments`, and the new candidate/job AI columns), preserving all 12 jobs and 82 candidates. The installer `Bread_0.4.0_x64-setup.exe` is produced by `npm run tauri build`.
+- **Packaged v0.3 launch:** `bread.exe` started from the release build with the previous v0.2 database, migrated it from schema version 2 to 3 (`clip_exports` table plus `jobs.transcript_json`), and preserved all 10 jobs, 44 candidates, and completed analyses.
 - **Non-gameplay negatives:** the Kenta “replay” files are desktop/browser screen recordings, not gameplay, and are excluded from gaming accuracy. They produced 0–3 visual candidates (scores 30–40); the 60 s TikTok feed produced two fused visual+audio candidates (scores 83 and 64). These show the detector’s behavior on menu/scene content, not whether it finds gaming highlights.
 
 Only one real gaming recording was available, so precision and recall above are single-sample observations. Do not generalize them to a game library.
 
 ## Optional cloud AI analysis (Gemini)
 
-Luna's detector is deterministic signal processing. It can tell that something moved and sounded loud, but not that a goal was scored. The optional cloud layer adds semantic understanding from Google's Gemini Developer API, and is **off by default**. Every local feature keeps working with no key, no network, or cloud turned off.
+Bread's detector is deterministic signal processing. It can tell that something moved and sounded loud, but not that a goal was scored. The optional cloud layer adds semantic understanding from Google's Gemini Developer API, and is **off by default**. Every local feature keeps working with no key, no network, or cloud turned off.
 
 **Setup (BYOK — bring your own key).** Open **Cloud AI analysis**, optionally pick a model, paste **your own** Gemini API key, choose how many windows a run may use, and accept the processing notice. There is no bundled developer key: a distributed build requires each user to supply their own.
 
-- **Where the key goes:** Windows Credential Manager (`Luna/GeminiApiKey`), written through `CredWriteW` in `src-tauri/src/credentials.rs`. It is never stored in the repository, the SQLite database, the frontend, application state, logs, a file, or a command line. It is passed to the Python worker as one line on its stdin pipe, which the host then holds open for cancellation.
+- **Where the key goes:** Windows Credential Manager (`Bread/GeminiApiKey`), written through `CredWriteW` in `src-tauri/src/credentials.rs`. It is never stored in the repository, the SQLite database, the frontend, application state, logs, a file, or a command line. It is passed to the Python worker as one line on its stdin pipe, which the host then holds open for cancellation.
 - **Privacy notice:** enabling cloud analysis requires an explicit acknowledgement that selected segments leave the device and that Google's free tier may use submitted content to improve its products. Turning the feature off withdraws that consent for later runs.
-- **What is uploaded:** only the individual segments Luna selects (10–30 seconds each, scaled to 720p with their audio), never the original recording. Each uploaded file is deleted from Google after its request, including on failure, and the local temporary file is removed too.
+- **What is uploaded:** only the individual segments Bread selects (10–30 seconds each, scaled to 720p with their audio), never the original recording. Each uploaded file is deleted from Google after its request, including on failure, and the local temporary file is removed too.
 - **Model:** the default and primary model is `gemini-3.8-flash`. The settings list also offers `gemini-3.7-flash`, `gemini-3.5-flash`, and `gemini-2.5-flash`. Requests use `generateContent` with a JSON `responseSchema`, so a reply either matches the schema or is rejected.
 
-**Staged pipeline** (`worker/luna_worker/ai.py` plans and validates, `worker/luna_worker/gemini.py` speaks HTTP, `worker/ai_worker.py` orchestrates):
+**Staged pipeline** (`worker/bread_worker/ai.py` plans and validates, `worker/bread_worker/gemini.py` speaks HTTP, `worker/ai_worker.py` orchestrates):
 
 1. The local detector runs first and produces the ranked candidates, exactly as before.
 2. `plan_windows` takes every candidate plus a bounded number of promising low-confidence candidates and periodic sampled windows, so Gemini can also surface moments the detector missed. `max_windows` caps the cloud cost.
@@ -88,13 +88,13 @@ Luna's detector is deterministic signal processing. It can tell that something m
 6. Evidence is fused, not replaced. A Gemini highlight scores `0.6 × local + 0.4 × AI`; a Gemini rejection demotes the local candidate to `0.45 × local` instead of deleting it; a locally strong visual-only highlight is never discarded for lacking speech. Gemini may add a new candidate when it found a highlight inside a sampled window and returned a valid timestamp. Duplicates within about two seconds are merged into the existing candidate. Every assessment is stored in `ai_assessments` with its window, model and origin, and the local columns are left untouched so the final ranking stays explainable.
 7. Titles come only from model output: `"Goal — a goal is scored after a strong offensive play"`. The local title is kept in its own column.
 
-**Reliability.** Requests have timeouts, exponential backoff with `Retry-After` support for 429/5xx, a bounded number of retries, explicit handling for invalid keys, unavailable models, exhausted free-tier quota and empty replies, and cancellation through the same stdin channel as analysis. A rate limit or failure only ends the cloud stage: the local job, its candidates and its clips are untouched. Luna never retries an exhausted quota in a loop, and does not claim the free tier is unlimited.
+**Reliability.** Requests have timeouts, exponential backoff with `Retry-After` support for 429/5xx, a bounded number of retries, explicit handling for invalid keys, unavailable models, exhausted free-tier quota and empty replies, and cancellation through the same stdin channel as analysis. A rate limit or failure only ends the cloud stage: the local job, its candidates and its clips are untouched. Bread never retries an exhausted quota in a loop, and does not claim the free tier is unlimited.
 
 **Statuses shown in the app:** local only / no key / ready / reviewing / completed / rate limited / failed / stopped, plus a per-run message such as `Cloud AI reviewed 3 of 4 window(s), 1 rejected`.
 
 ## Optional local speech models
 
-The baseline audio/video path runs without AI packages. Silero VAD activates when the `silero-vad` package is installed. Faster-Whisper activates only when a complete local CTranslate2 model folder is found; Luna uses CPU int8 and `local_files_only=True` and never downloads a model automatically.
+The baseline audio/video path runs without AI packages. Silero VAD activates when the `silero-vad` package is installed. Faster-Whisper activates only when a complete local CTranslate2 model folder is found; Bread uses CPU int8 and `local_files_only=True` and never downloads a model automatically.
 
 On this machine the optional stack lives in the project `.venv` (Python 3.12):
 
@@ -103,15 +103,15 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r worker/requirements-optional.txt
 ```
 
-Download a model separately, for example `Systran/faster-whisper-base.en`, into `.models/faster-whisper-base.en`. Model discovery checks `LUNA_WHISPER_MODEL` first, then `LUNA_MODELS_DIR`, then `.models` folders found by walking up from the working directory and from the worker's packaged location. This means the source checkout and a packaged build both find `D:\Bread\.models`; an installed copy can point `LUNA_MODELS_DIR` at its model folder.
+Download a model separately, for example `Systran/faster-whisper-base.en`, into `.models/faster-whisper-base.en`. Model discovery checks `BREAD_WHISPER_MODEL` first, then `BREAD_MODELS_DIR`, then `.models` folders found by walking up from the working directory and from the worker's packaged location. This means the source checkout and a packaged build both find `D:\Bread\.models`; an installed copy can point `BREAD_MODELS_DIR` at its model folder.
 
 Transcription is optional and is skipped when the selected audio is effectively silent or no model is available. The desktop host allows at least **120 seconds** of worker idle time (7% of recording duration for long files, capped by a 12-hour total runtime), and the worker emits 10-second heartbeats while a model loads or transcribes, so model initialization does not trip the idle timeout.
 
-Luna looks for Python 3.11+ in common Windows install locations and through the `py -3`, `python3`, and `python` commands. For a non-standard installation, set `LUNA_PYTHON` to the Python executable path before starting Luna. FFmpeg and FFprobe must be on `PATH`.
+Bread looks for Python 3.11+ in common Windows install locations and through the `py -3`, `python3`, and `python` commands. For a non-standard installation, set `BREAD_PYTHON` to the Python executable path before starting Bread. FFmpeg and FFprobe must be on `PATH`.
 
 ## Optional local AI clip titles
 
-For AI-generated clip titles, run a local Ollama-compatible service and set `LUNA_TITLE_MODEL` to an installed model name before starting Luna. The default endpoint is `http://127.0.0.1:11434/api/generate`; `LUNA_TITLE_ENDPOINT` can point to another localhost endpoint. Luna sends only the clip's short transcript and analysis evidence to that local service. If no model responds, Luna still saves the clip with a descriptive title based on the detected signals and timestamp. This title model is separate from Faster-Whisper transcription.
+For AI-generated clip titles, run a local Ollama-compatible service and set `BREAD_TITLE_MODEL` to an installed model name before starting Bread. The default endpoint is `http://127.0.0.1:11434/api/generate`; `BREAD_TITLE_ENDPOINT` can point to another localhost endpoint. Bread sends only the clip's short transcript and analysis evidence to that local service. If no model responds, Bread still saves the clip with a descriptive title based on the detected signals and timestamp. This title model is separate from Faster-Whisper transcription.
 
 ## Requirements
 
@@ -131,7 +131,7 @@ For a release build and launch, use the Tauri CLI so the production `custom-prot
 
 ```powershell
 npm run tauri build
-.\run-luna.cmd
+.\run-bread.cmd
 ```
 
 If you invoke Cargo directly, you must enable the feature yourself. Without it Tauri builds a development binary that loads `http://127.0.0.1:1420` instead of the embedded UI:
@@ -140,7 +140,7 @@ If you invoke Cargo directly, you must enable the feature yourself. Without it T
 cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
 ```
 
-After building, double-click `run-luna.cmd` to launch the desktop app with its database, WebView profile, temporary files, and model cache contained under `.runtime` in this project. Desktop apps started by command sessions may be closed when the session ends; launching this script from Explorer runs it outside that session.
+After building, double-click `run-bread.cmd` to launch the desktop app with its database, WebView profile, temporary files, and model cache contained under `.runtime` in this project. Desktop apps started by command sessions may be closed when the session ends; launching this script from Explorer runs it outside that session.
 
 ## Verify
 
@@ -165,7 +165,7 @@ On this Windows GNU toolchain, a Tauri-linked Rust test binary fails at process 
 - VAD and transcription depend on the optional local packages/models. The app remains useful without them.
 - One analysis runs at a time. The worker decodes the source separately for audio and video.
 - Captions exist only as burned-in text generated from saved transcription. There is no editable subtitle track, cloud source, account integration, or platform stream downloading. Clip title quality depends on the separate optional local-token model; evidence titles are used when it is unavailable.
-- Short-form framing is deterministic cropping and letterboxing. Gemini can suggest a focus point per candidate, but Luna does not track a subject across frames and never changes framing on its own.
+- Short-form framing is deterministic cropping and letterboxing. Gemini can suggest a focus point per candidate, but Bread does not track a subject across frames and never changes framing on its own.
 - Exports always use CPU libx264; GPU encoders are not offered, so long batches are slower on weak hardware than an NVENC build would be.
 - One short-form export batch runs at a time, and only one analysis runs at a time.
 - The Rust Tauri-linked unit-test harness remains blocked by the toolchain issue described above; the desktop build and the Tauri-free logic tests are verified.

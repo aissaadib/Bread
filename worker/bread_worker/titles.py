@@ -15,9 +15,9 @@ def _clean(title: str) -> str:
 
 
 def generate(candidate: dict, transcript: list[dict] | None = None) -> tuple[str, str]:
-    model = os.environ.get("LUNA_TITLE_MODEL", "").strip()
+    model = os.environ.get("BREAD_TITLE_MODEL", "").strip()
     if model:
-        endpoint = os.environ.get("LUNA_TITLE_ENDPOINT", "http://127.0.0.1:11434/api/generate")
+        endpoint = os.environ.get("BREAD_TITLE_ENDPOINT", "http://127.0.0.1:11434/api/generate")
         parsed = urllib.parse.urlparse(endpoint)
         if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
             context = " ".join(

@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "worker"))
 
-from luna_worker import captions, export, framing, media
+from bread_worker import captions, export, framing, media
 
 
 def run_ffmpeg(arguments: list[str], cwd: Path | None = None) -> None:
@@ -144,7 +144,7 @@ class CaptionTests(unittest.TestCase):
 class RenderingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.temp = Path(tempfile.mkdtemp(prefix="luna-export-tests-"))
+        cls.temp = Path(tempfile.mkdtemp(prefix="bread-export-tests-"))
         cls.landscape = cls.temp / "landscape.mp4"
         run_ffmpeg([
             "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=4",

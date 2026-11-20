@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Luna",
+  "productName": "Bread",
   "version": "0.4.0",
-  "identifier": "com.aissaadib.luna",
+  "identifier": "com.aissaadib.bread",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Luna - Stream Analyzer",
+        "title": "Bread - Stream Analyzer",
         "width": 1200,
         "height": 840,
         "minWidth": 900,
@@ -37,7 +37,7 @@
       "../worker/clipper_worker.py": "worker/clipper_worker.py",
       "../worker/export_worker.py": "worker/export_worker.py",
       "../worker/ai_worker.py": "worker/ai_worker.py",
-      "../worker/luna_worker/": "worker/luna_worker/",
+      "../worker/bread_worker/": "worker/bread_worker/",
       "../worker/config.json": "worker/config.json"
     }
   }

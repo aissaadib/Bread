@@ -129,7 +129,7 @@ mod platform {
     }
 }
 
-pub const TARGET: &str = "Luna/GeminiApiKey";
+pub const TARGET: &str = "Bread/GeminiApiKey";
 
 pub fn store_gemini_key(key: &str) -> Result<(), String> {
     let trimmed = key.trim();

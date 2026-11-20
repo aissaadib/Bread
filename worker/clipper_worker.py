@@ -5,8 +5,8 @@ import json
 import sys
 import threading
 
-from luna_worker.pipeline import analyze
-from luna_worker.protocol import emit, log
+from bread_worker.pipeline import analyze
+from bread_worker.protocol import emit, log
 
 
 def main() -> int:

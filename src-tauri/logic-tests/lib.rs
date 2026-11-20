@@ -93,7 +93,7 @@ mod tests {
         use serde_json::json;
         use std::fs;
 
-        let directory = std::env::temp_dir().join(format!("luna-storage-test-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("bread-storage-test-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("test.sqlite3");
         let _ = fs::remove_file(&path);

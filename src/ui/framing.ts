@@ -1,7 +1,7 @@
 import type { FramingAspect, FramingMode } from "./types";
 
 /**
- * TypeScript mirror of worker/luna_worker/framing.py.
+ * TypeScript mirror of worker/bread_worker/framing.py.
  *
  * Preview and export must agree on the canvas, the source rectangle, and the
  * foreground placement. Keep both implementations in sync when changing the

@@ -23,8 +23,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from luna_worker import ai, media
-from luna_worker.gemini import GeminiClient, GeminiError, RateLimitedError
+from bread_worker import ai, media
+from bread_worker.gemini import GeminiClient, GeminiError, RateLimitedError
 
 _lock = threading.Lock()
 
@@ -150,7 +150,7 @@ def assess_window(client: GeminiClient, source: str, info: dict[str, Any],
 
         send("ai_progress", jobId=job_id, stage="uploading",
              progress=_progress(index, total, 0.35), window=index, total=total)
-        file_info = client.upload_file(str(segment), "video/mp4", f"luna-window-{index:02d}.mp4")
+        file_info = client.upload_file(str(segment), "video/mp4", f"bread-window-{index:02d}.mp4")
         remote_name = file_info.get("name", "")
         file_info = client.wait_until_active(file_info)
         file_uri = file_info.get("uri") or remote_name
@@ -241,7 +241,7 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
     assessed = failed = rejected = 0
     last_error = ""
 
-    with tempfile.TemporaryDirectory(prefix="luna-ai-") as temporary_name:
+    with tempfile.TemporaryDirectory(prefix="bread-ai-") as temporary_name:
         temporary = Path(temporary_name)
         for index, window in enumerate(windows):
             try:
@@ -284,7 +284,7 @@ def run(request: dict[str, Any], api_key: str, cancelled: threading.Event,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Luna optional cloud analysis worker")
+    parser = argparse.ArgumentParser(description="Bread optional cloud analysis worker")
     parser.add_argument("--request", help="Path to the cloud analysis request JSON")
     parser.add_argument("--test-connection", action="store_true",
                         help="Only verify that the stored key can reach the model")
@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.test_connection:
         try:
-            result = GeminiClient(api_key, os.environ.get("LUNA_AI_MODEL")).test_connection()
+            result = GeminiClient(api_key, os.environ.get("BREAD_AI_MODEL")).test_connection()
         except GeminiError as error:
             send("test", ok=False, code=error.code, message=str(error))
             return 1
